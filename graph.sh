@@ -103,7 +103,8 @@ class WaveformWidget(Gtk.DrawingArea):
         self.history.append(rms)
         
         # Keep only max_history items (scroll effect)
-        if len(self.history) > self.max_history:
+        # Trim from the front to always show the most recent data
+        while len(self.history) > self.max_history:
             self.history.pop(0)
         
         self.queue_draw()
@@ -135,22 +136,39 @@ class WaveformWidget(Gtk.DrawingArea):
         
         cr.set_source_rgb(*self.wave_color)
         
-        # Calculate bar width
-        bar_width = max(1, width / self.max_history)
+        # Calculate bar width - allow fractional values for thin bars
+        bar_width = width / self.max_history
         middle = height / 2
         
-        # Draw each amplitude value as a vertical bar
-        for i, amplitude in enumerate(self.history):
-            x = i * bar_width
+        # Optimize drawing based on bar width
+        if bar_width >= 1.0:
+            # Normal mode: draw individual bars
+            for i, amplitude in enumerate(self.history):
+                x = i * bar_width
+                
+                # Scale amplitude with user control
+                scaled_amp = amplitude * self.amplitude * middle * 0.9
+                
+                # Draw vertical bar from center
+                cr.set_line_width(self.wave_thickness)
+                cr.move_to(x, middle - scaled_amp)
+                cr.line_to(x, middle + scaled_amp)
+                cr.stroke()
+        else:
+            # Thin bar mode: draw more efficiently with rectangles
+            # Use thinner line width for very dense waveforms
+            effective_thickness = max(0.5, min(self.wave_thickness, bar_width))
             
-            # Scale amplitude with user control
-            scaled_amp = amplitude * self.amplitude * middle * 0.9
-            
-            # Draw vertical bar from center
-            cr.set_line_width(self.wave_thickness)
-            cr.move_to(x, middle - scaled_amp)
-            cr.line_to(x, middle + scaled_amp)
-            cr.stroke()
+            for i, amplitude in enumerate(self.history):
+                x = i * bar_width
+                
+                # Scale amplitude with user control
+                scaled_amp = amplitude * self.amplitude * middle * 0.9
+                
+                # Draw as a thin rectangle for better performance
+                if scaled_amp > 0:
+                    cr.rectangle(x, middle - scaled_amp, effective_thickness, scaled_amp * 2)
+                    cr.fill()
         
         # Draw scrolling position indicator (rightmost edge highlighted)
         if self.dark_theme:
@@ -158,7 +176,8 @@ class WaveformWidget(Gtk.DrawingArea):
         else:
             cr.set_source_rgba(0.0, 0.0, 0.0, 0.3)
         cr.set_line_width(2)
-        x_pos = len(self.history) * bar_width
+        # Use actual width to ensure indicator is at the right edge
+        x_pos = min(len(self.history) * bar_width, width - 1)
         cr.move_to(x_pos, 0)
         cr.line_to(x_pos, height)
         cr.stroke()
@@ -168,6 +187,7 @@ class AudioVisualizerWindow(Gtk.Window):
         super().__init__(title="Audio Waveform Monitor")
         self.set_default_size(900, 500)
         self.set_border_width(10)
+        self.set_resizable(False)  # Make it float like volume control
         
         self.monitor = AudioMonitor()
         self.buffer_size = 2205  # Reduced to 0.05 seconds at 44100 Hz (was 0.1s)
