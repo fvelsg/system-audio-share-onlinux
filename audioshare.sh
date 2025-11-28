@@ -372,31 +372,6 @@ class MainWindow(Gtk.Window):
                            stderr=subprocess.DEVNULL)
         except Exception as e:
             self.show_error(f"Failed to launch graph.sh:\n\n{str(e)}")
-    
-    def on_no_feedback(self, button):
-        """Launch the outputs-to-inputs.py script"""
-        # Get the directory where this script is located
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        no_feedback_script = os.path.join(script_dir, 'outputs-to-inputs.py')
-        
-        # Check if outputs-to-inputs.py exists
-        if not os.path.exists(no_feedback_script):
-            self.show_error(f"outputs-to-inputs.py not found!\n\nExpected location:\n{no_feedback_script}")
-            return
-        
-        # Check if outputs-to-inputs.py is executable
-        if not os.access(no_feedback_script, os.X_OK):
-            self.show_error(f"outputs-to-inputs.py is not executable!\n\nRun: chmod +x {no_feedback_script}")
-            return
-        
-        try:
-            # Launch the script in the background
-            subprocess.Popen([no_feedback_script], 
-                           cwd=script_dir,
-                           stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL)
-        except Exception as e:
-            self.show_error(f"Failed to launch outputs-to-inputs.py:\n\n{str(e)}")
 
 
 def check_dependencies():
