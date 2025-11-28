@@ -141,7 +141,7 @@ class MainWindow(Gtk.Window):
     def __init__(self):
         super().__init__(title="Audio Connection Manager")
         self.set_border_width(10)
-        self.set_default_size(450, 400)
+        self.set_default_size(450, 450)
         self.set_resizable(False)
         self.set_position(Gtk.WindowPosition.CENTER)
         
@@ -184,6 +184,10 @@ class MainWindow(Gtk.Window):
         btn_graph = Gtk.Button(label="Monitor Graph")
         btn_graph.connect("clicked", self.on_monitor_graph)
         vbox.pack_start(btn_graph, False, False, 0)
+        
+        btn_no_feedback = Gtk.Button(label="No feedback (Alpha)")
+        btn_no_feedback.connect("clicked", self.on_no_feedback)
+        vbox.pack_start(btn_no_feedback, False, False, 0)
         
         # Separator
         vbox.pack_start(Gtk.Separator(), False, False, 5)
@@ -368,6 +372,31 @@ class MainWindow(Gtk.Window):
                            stderr=subprocess.DEVNULL)
         except Exception as e:
             self.show_error(f"Failed to launch graph.sh:\n\n{str(e)}")
+    
+    def on_no_feedback(self, button):
+        """Launch the outputs-to-inputs.py script"""
+        # Get the directory where this script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        no_feedback_script = os.path.join(script_dir, 'outputs-to-inputs.py')
+        
+        # Check if outputs-to-inputs.py exists
+        if not os.path.exists(no_feedback_script):
+            self.show_error(f"outputs-to-inputs.py not found!\n\nExpected location:\n{no_feedback_script}")
+            return
+        
+        # Check if outputs-to-inputs.py is executable
+        if not os.access(no_feedback_script, os.X_OK):
+            self.show_error(f"outputs-to-inputs.py is not executable!\n\nRun: chmod +x {no_feedback_script}")
+            return
+        
+        try:
+            # Launch the script in the background
+            subprocess.Popen([no_feedback_script], 
+                           cwd=script_dir,
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        except Exception as e:
+            self.show_error(f"Failed to launch outputs-to-inputs.py:\n\n{str(e)}")
 
 
 def check_dependencies():
