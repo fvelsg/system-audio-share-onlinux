@@ -11,7 +11,6 @@ import subprocess
 import threading
 import os
 import signal
-import psutil
 
 class AudioMixerGUI(Gtk.Window):
     def __init__(self):
@@ -22,7 +21,6 @@ class AudioMixerGUI(Gtk.Window):
         
         # State variables
         self.monitor_process = None
-        self.legacy_process = None
         self.is_connected = False
         self.is_connecting = False
         self.step_percentage = 20
@@ -529,47 +527,6 @@ class AudioMixerGUI(Gtk.Window):
         except Exception as e:
             self.show_error_dialog(f"Failed to open advanced mode: {e}")
     
-    def kill_process_tree(self, pid):
-        """Kill a process and all its children"""
-        try:
-            parent = psutil.Process(pid)
-            children = parent.children(recursive=True)
-            
-            # Terminate children first
-            for child in children:
-                try:
-                    child.terminate()
-                except psutil.NoSuchProcess:
-                    pass
-            
-            # Terminate parent
-            try:
-                parent.terminate()
-            except psutil.NoSuchProcess:
-                pass
-            
-            # Wait for termination
-            gone, alive = psutil.wait_procs(children + [parent], timeout=3)
-            
-            # Force kill any remaining processes
-            for p in alive:
-                try:
-                    p.kill()
-                except psutil.NoSuchProcess:
-                    pass
-        except psutil.NoSuchProcess:
-            pass
-        except Exception as e:
-            print(f"Error killing process tree: {e}")
-    
-    def monitor_legacy_process(self):
-        """Monitor the legacy process and clean up when it exits"""
-        if self.legacy_process:
-            self.legacy_process.wait()
-            # Legacy app closed, don't close this GUI anymore
-            # Just clean up the process reference
-            self.legacy_process = None
-    
     def on_legacy_clicked(self, button):
         """Open legacy audioshare app"""
         legacy_path = self.get_legacy_script_path()
@@ -581,7 +538,7 @@ class AudioMixerGUI(Gtk.Window):
             # Detect file type and run appropriately
             if legacy_path.endswith('.py'):
                 # Python file
-                self.legacy_process = subprocess.Popen(["python3", legacy_path])
+                subprocess.Popen(["python3", legacy_path])
             elif legacy_path.endswith('.sh'):
                 # Check if it's actually a Python file with wrong extension
                 with open(legacy_path, 'r') as f:
@@ -589,23 +546,19 @@ class AudioMixerGUI(Gtk.Window):
                 
                 if 'python' in first_line or 'import' in first_line:
                     # It's Python code
-                    self.legacy_process = subprocess.Popen(["python3", legacy_path])
+                    subprocess.Popen(["python3", legacy_path])
                 else:
                     # It's a bash script
-                    self.legacy_process = subprocess.Popen(["bash", legacy_path])
+                    subprocess.Popen(["bash", legacy_path])
             else:
                 # No extension, check shebang
                 with open(legacy_path, 'r') as f:
                     first_line = f.readline().strip()
                 
                 if 'python' in first_line:
-                    self.legacy_process = subprocess.Popen(["python3", legacy_path])
+                    subprocess.Popen(["python3", legacy_path])
                 else:
-                    self.legacy_process = subprocess.Popen([legacy_path])
-            
-            # Start monitoring thread
-            monitor_thread = threading.Thread(target=self.monitor_legacy_process, daemon=True)
-            monitor_thread.start()
+                    subprocess.Popen([legacy_path])
             
             # Close this GUI
             self.cleanup()
@@ -625,7 +578,6 @@ class AudioMixerGUI(Gtk.Window):
     
     def cleanup(self):
         """Cleanup before exit"""
-        # Clean up monitor process
         if self.monitor_process:
             try:
                 self.monitor_process.send_signal(signal.SIGINT)
@@ -635,20 +587,6 @@ class AudioMixerGUI(Gtk.Window):
                     self.monitor_process.kill()
                 except:
                     pass
-        
-        # Clean up legacy process and all its children
-        if self.legacy_process:
-            try:
-                self.kill_process_tree(self.legacy_process.pid)
-            except:
-                try:
-                    self.legacy_process.terminate()
-                    self.legacy_process.wait(timeout=2)
-                except:
-                    try:
-                        self.legacy_process.kill()
-                    except:
-                        pass
 
 def main():
     # Check dependencies
