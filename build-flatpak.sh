@@ -1,7 +1,8 @@
 #!/bin/bash
 ###############################################################################
-# Audio Connection Manager - Flatpak Build Script
-# This script automates the complete process of building a Flatpak package
+# Audio Sharing Control - Flatpak Build Script (GitHub Version)
+# Downloads sources from GitHub instead of requiring local files
+# Auto-installs dependencies for multiple Linux distributions
 ###############################################################################
 
 set -e  # Exit on error
@@ -15,10 +16,16 @@ NC='\033[0m' # No Color
 
 # Configuration
 APP_ID="com.audioshare.AudioConnectionManager"
-APP_NAME="Audio Connection Manager"
+APP_NAME="Audio Sharing Control"
 VERSION="1.0.0"
 BUILD_DIR="flatpak-build"
 REPO_DIR="flatpak-repo"
+
+# GitHub configuration
+GITHUB_USER="fvelsg"
+GITHUB_REPO="system-audio-share-onlinux"
+GITHUB_BRANCH="main"
+GITHUB_BASE_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
 # Print colored message
 print_msg() {
@@ -42,12 +49,105 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Step 1: Check dependencies
-check_dependencies() {
-    print_step "Step 1: Checking Dependencies"
+# Detect Linux distribution
+detect_distro() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        DISTRO_ID="$ID"
+        DISTRO_ID_LIKE="$ID_LIKE"
+        DISTRO_NAME="$NAME"
+    elif [ -f /etc/lsb-release ]; then
+        . /etc/lsb-release
+        DISTRO_ID="$DISTRIB_ID"
+        DISTRO_NAME="$DISTRIB_DESCRIPTION"
+    else
+        DISTRO_ID="unknown"
+        DISTRO_NAME="Unknown Linux"
+    fi
+    
+    # Normalize distro ID
+    DISTRO_ID=$(echo "$DISTRO_ID" | tr '[:upper:]' '[:lower:]')
+    DISTRO_ID_LIKE=$(echo "$DISTRO_ID_LIKE" | tr '[:upper:]' '[:lower:]')
+}
+
+# Determine package manager and install command
+get_package_manager() {
+    detect_distro
+    
+    # Check for specific distributions and their derivatives
+    if [[ "$DISTRO_ID" == "arch" ]] || [[ "$DISTRO_ID_LIKE" == *"arch"* ]] || command_exists pacman; then
+        PKG_MANAGER="pacman"
+        INSTALL_CMD="sudo pacman -S --noconfirm"
+        UPDATE_CMD="sudo pacman -Sy"
+        PACKAGES=(flatpak flatpak-builder curl coreutils imagemagick librsvg)
+        
+    elif [[ "$DISTRO_ID" == "fedora" ]] || [[ "$DISTRO_ID" == "rhel" ]] || [[ "$DISTRO_ID" == "centos" ]] || [[ "$DISTRO_ID_LIKE" == *"fedora"* ]] || [[ "$DISTRO_ID_LIKE" == *"rhel"* ]] || command_exists dnf; then
+        PKG_MANAGER="dnf"
+        INSTALL_CMD="sudo dnf install -y"
+        UPDATE_CMD="sudo dnf check-update || true"
+        PACKAGES=(flatpak flatpak-builder curl coreutils ImageMagick librsvg2-tools)
+        
+    elif [[ "$DISTRO_ID" == "opensuse"* ]] || [[ "$DISTRO_ID_LIKE" == *"suse"* ]] || command_exists zypper; then
+        PKG_MANAGER="zypper"
+        INSTALL_CMD="sudo zypper install -y"
+        UPDATE_CMD="sudo zypper refresh"
+        PACKAGES=(flatpak flatpak-builder curl coreutils ImageMagick librsvg)
+        
+    elif [[ "$DISTRO_ID" == "debian" ]] || [[ "$DISTRO_ID" == "ubuntu" ]] || [[ "$DISTRO_ID_LIKE" == *"debian"* ]] || [[ "$DISTRO_ID_LIKE" == *"ubuntu"* ]] || command_exists apt-get; then
+        PKG_MANAGER="apt"
+        INSTALL_CMD="sudo apt-get install -y"
+        UPDATE_CMD="sudo apt-get update"
+        PACKAGES=(flatpak flatpak-builder curl coreutils imagemagick librsvg2-bin)
+        
+    elif command_exists apk; then
+        PKG_MANAGER="apk"
+        INSTALL_CMD="sudo apk add"
+        UPDATE_CMD="sudo apk update"
+        PACKAGES=(flatpak flatpak-builder curl coreutils imagemagick librsvg)
+        
+    elif command_exists emerge; then
+        PKG_MANAGER="portage"
+        INSTALL_CMD="sudo emerge"
+        UPDATE_CMD="sudo emerge --sync"
+        PACKAGES=(sys-apps/flatpak dev-util/flatpak-builder net-misc/curl sys-apps/coreutils media-gfx/imagemagick gnome-base/librsvg)
+        
+    elif command_exists xbps-install; then
+        PKG_MANAGER="xbps"
+        INSTALL_CMD="sudo xbps-install -y"
+        UPDATE_CMD="sudo xbps-install -S"
+        PACKAGES=(flatpak flatpak-builder curl coreutils ImageMagick librsvg-utils)
+        
+    else
+        print_error "Could not detect package manager"
+        print_msg "Supported distributions:"
+        print_msg "  - Ubuntu/Debian based (apt)"
+        print_msg "  - Fedora/RHEL/CentOS (dnf)"
+        print_msg "  - Arch Linux based (pacman)"
+        print_msg "  - openSUSE (zypper)"
+        print_msg "  - Alpine Linux (apk)"
+        print_msg "  - Gentoo (portage)"
+        print_msg "  - Void Linux (xbps)"
+        return 1
+    fi
+    
+    print_msg "Detected distribution: $DISTRO_NAME"
+    print_msg "Package manager: $PKG_MANAGER"
+    return 0
+}
+
+# Install missing dependencies
+install_dependencies() {
+    print_step "Installing Missing Dependencies"
+    
+    if ! get_package_manager; then
+        print_error "Cannot proceed without package manager detection"
+        exit 1
+    fi
     
     local missing_deps=()
+    local missing_packages=()
     
+    # Check which dependencies are missing
     if ! command_exists flatpak; then
         missing_deps+=("flatpak")
     fi
@@ -56,13 +156,93 @@ check_dependencies() {
         missing_deps+=("flatpak-builder")
     fi
     
-    if [ ${#missing_deps[@]} -ne 0 ]; then
-        print_error "Missing dependencies: ${missing_deps[*]}"
-        echo "Install with: sudo apt install ${missing_deps[*]}"
+    if ! command_exists curl; then
+        missing_deps+=("curl")
+    fi
+    
+    if ! command_exists sha256sum; then
+        missing_deps+=("coreutils/sha256sum")
+    fi
+    
+    # Optional but recommended tools
+    if ! command_exists convert; then
+        missing_deps+=("imagemagick (optional)")
+    fi
+    
+    if ! command_exists rsvg-convert; then
+        missing_deps+=("librsvg (optional)")
+    fi
+    
+    if [ ${#missing_deps[@]} -eq 0 ]; then
+        print_msg "All dependencies are already installed!"
+        return 0
+    fi
+    
+    print_warning "Missing dependencies: ${missing_deps[*]}"
+    echo ""
+    
+    # Ask for confirmation
+    read -p "Do you want to install missing dependencies? (Y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]] && [[ ! -z $REPLY ]]; then
+        print_error "Cannot proceed without required dependencies"
         exit 1
     fi
     
-    print_msg "All required tools are installed"
+    print_msg "Updating package database..."
+    eval "$UPDATE_CMD" || print_warning "Package update failed, continuing anyway..."
+    
+    print_msg "Installing packages: ${PACKAGES[*]}"
+    
+    if eval "$INSTALL_CMD ${PACKAGES[*]}"; then
+        print_msg "Dependencies installed successfully!"
+    else
+        print_error "Failed to install some dependencies"
+        print_msg "You may need to install them manually:"
+        print_msg "  ${PACKAGES[*]}"
+        exit 1
+    fi
+    
+    # Add Flathub repository if not already added
+    if ! flatpak remotes | grep -q flathub; then
+        print_msg "Adding Flathub repository..."
+        flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+    fi
+}
+
+# Step 1: Check dependencies (now just verifies after auto-install)
+check_dependencies() {
+    print_step "Step 1: Verifying Dependencies"
+    
+    # First, try to install any missing dependencies
+    install_dependencies
+    
+    # Verify all critical dependencies are now available
+    local missing_critical=()
+    
+    if ! command_exists flatpak; then
+        missing_critical+=("flatpak")
+    fi
+    
+    if ! command_exists flatpak-builder; then
+        missing_critical+=("flatpak-builder")
+    fi
+    
+    if ! command_exists curl; then
+        missing_critical+=("curl")
+    fi
+    
+    if ! command_exists sha256sum; then
+        missing_critical+=("coreutils/sha256sum")
+    fi
+    
+    if [ ${#missing_critical[@]} -ne 0 ]; then
+        print_error "Critical dependencies still missing: ${missing_critical[*]}"
+        print_msg "Please install them manually and try again"
+        exit 1
+    fi
+    
+    print_msg "All required dependencies are installed!"
 }
 
 # Step 2: Check for GNOME runtime
@@ -83,33 +263,52 @@ create_structure() {
     print_step "Step 3: Creating Project Structure"
     
     # Create main directory
-    mkdir -p "$BUILD_DIR"/{src,files}
+    mkdir -p "$BUILD_DIR/files"
     
     print_msg "Created directory: $BUILD_DIR"
+}
+
+# Step 4: Download files from GitHub and generate hashes
+download_and_hash() {
+    print_step "Step 4: Downloading Files from GitHub"
     
-    # Check if source scripts exist in current directory
-    local scripts=("audioshare.sh" "advanced-mode.sh" "volume-control.sh" "graph.sh")
-    local missing_scripts=()
+    local scripts=("audioshare.sh" "advanced-mode.sh" "volume-control.sh" "graph.sh" "connect-outputs-to-inputs.sh" "outputs-to-inputs.py")
+    local temp_dir="$BUILD_DIR/temp"
+    mkdir -p "$temp_dir"
+    
+    declare -A file_hashes
     
     for script in "${scripts[@]}"; do
-        if [ -f "$script" ]; then
-            cp "$script" "$BUILD_DIR/src/"
-            chmod +x "$BUILD_DIR/src/$script"
-            print_msg "Copied: $script"
+        local url="${GITHUB_BASE_URL}/${script}"
+        print_msg "Downloading: $script"
+        
+        if curl -fsSL "$url" -o "$temp_dir/$script"; then
+            # Generate SHA256 hash
+            local hash=$(sha256sum "$temp_dir/$script" | cut -d' ' -f1)
+            file_hashes["$script"]="$hash"
+            print_msg "  SHA256: $hash"
         else
-            missing_scripts+=("$script")
+            print_error "Failed to download: $script"
+            print_msg "URL attempted: $url"
+            exit 1
         fi
     done
     
-    if [ ${#missing_scripts[@]} -ne 0 ]; then
-        print_warning "Missing scripts: ${missing_scripts[*]}"
-        print_msg "Please place these scripts in the current directory"
-    fi
+    # Clean up temp directory
+    rm -rf "$temp_dir"
+    
+    # Export hashes for manifest creation
+    export AUDIOSHARE_HASH="${file_hashes[audioshare.sh]}"
+    export ADVANCED_HASH="${file_hashes[advanced-mode.sh]}"
+    export VOLUME_HASH="${file_hashes[volume-control.sh]}"
+    export GRAPH_HASH="${file_hashes[graph.sh]}"
+    export CONNECT_OUTPUTS_HASH="${file_hashes[connect-outputs-to-inputs.sh]}"
+    export OUTPUTS_TO_INPUTS_HASH="${file_hashes[outputs-to-inputs.py]}"
 }
 
-# Step 4: Create desktop file
+# Step 5: Create desktop file
 create_desktop_file() {
-    print_step "Step 4: Creating Desktop Entry"
+    print_step "Step 5: Creating Desktop Entry"
     
     cat > "$BUILD_DIR/files/$APP_ID.desktop" << EOF
 [Desktop Entry]
@@ -127,9 +326,9 @@ EOF
     print_msg "Created desktop file"
 }
 
-# Step 5: Create AppData XML
+# Step 6: Create AppData XML
 create_appdata() {
-    print_step "Step 5: Creating AppData Metadata"
+    print_step "Step 6: Creating AppData Metadata"
     
     cat > "$BUILD_DIR/files/$APP_ID.appdata.xml" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -142,7 +341,7 @@ create_appdata() {
   
   <description>
     <p>
-      Audio Connection Manager is a graphical tool for managing PipeWire audio connections.
+      Audio Sharing Control is a graphical tool for managing PipeWire audio connections.
       It allows you to easily connect your default audio monitor to application inputs,
       control volume, and visualize audio waveforms in real-time.
     </p>
@@ -164,8 +363,8 @@ create_appdata() {
     </screenshot>
   </screenshots>
   
-  <url type="homepage">https://github.com/yourusername/audioshare</url>
-  <url type="bugtracker">https://github.com/yourusername/audioshare/issues</url>
+  <url type="homepage">https://github.com/${GITHUB_USER}/${GITHUB_REPO}</url>
+  <url type="bugtracker">https://github.com/${GITHUB_USER}/${GITHUB_REPO}/issues</url>
   
   <content_rating type="oars-1.1" />
   
@@ -188,18 +387,27 @@ EOF
     print_msg "Created AppData file"
 }
 
-# Step 6: Create application icon
+# Step 7: Create application icon
 create_icon() {
-    print_step "Step 6: Creating Application Icon"
+    print_step "Step 7: Downloading Application Icon"
     
-    # Check if icon.png exists
-    if [ -f "icon.png" ]; then
-        cp icon.png "$BUILD_DIR/files/$APP_ID.png"
-        print_msg "Using existing icon.png"
-        return 0
+    # Try to download icon from GitHub
+    if curl -fsSL "${GITHUB_BASE_URL}/icon.png" -o "$BUILD_DIR/files/$APP_ID.png" 2>/dev/null; then
+        print_msg "Downloaded icon from GitHub: icon.png"
+        
+        # Verify it's a valid PNG
+        if file "$BUILD_DIR/files/$APP_ID.png" | grep -q "PNG"; then
+            print_msg "Icon verified as valid PNG image"
+            return 0
+        else
+            print_warning "Downloaded file is not a valid PNG, will create default icon"
+            rm -f "$BUILD_DIR/files/$APP_ID.png"
+        fi
+    else
+        print_warning "Could not download icon.png from GitHub"
     fi
     
-    print_warning "No icon.png found, attempting to create a default icon"
+    print_warning "Creating default icon with ImageMagick or rsvg-convert"
     
     # Try to create a simple icon with ImageMagick
     if command_exists convert; then
@@ -230,16 +438,16 @@ SVGEOF
     fi
     
     print_error "Could not create icon automatically"
-    print_msg "Please create a 256x256 PNG icon named 'icon.png' and rebuild"
+    print_msg "Please ensure icon.png exists in your GitHub repository"
     exit 1
 }
 
-# Step 7: Create Flatpak manifest
+# Step 8: Create Flatpak manifest with GitHub sources
 create_manifest() {
-    print_step "Step 7: Creating Flatpak Manifest"
+    print_step "Step 8: Creating Flatpak Manifest with GitHub Sources"
     
-    cat > "$BUILD_DIR/$APP_ID.yaml" << 'EOF'
-app-id: com.audioshare.AudioConnectionManager
+    cat > "$BUILD_DIR/$APP_ID.yaml" << EOF
+app-id: ${APP_ID}
 runtime: org.gnome.Platform
 runtime-version: '46'
 sdk: org.gnome.Sdk
@@ -268,9 +476,16 @@ finish-args:
   - --filesystem=host-etc:ro
 
 modules:
-  # Python 3 and GTK bindings (using runtime's Python3-gobject)
-  # Note: PyGObject is already included in org.gnome.Platform runtime
-  # We just need to ensure our scripts can find it
+  # Install jq for JSON processing (required by connect-outputs-to-inputs.sh)
+  - name: jq
+    buildsystem: autotools
+    config-opts:
+      - --with-oniguruma=builtin
+      - --disable-maintainer-mode
+    sources:
+      - type: archive
+        url: https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-1.7.1.tar.gz
+        sha256: 478c9ca129fd2e3443fe27314b455e211e0d8c60bc8ff7df703873deeee580c2
 
   # Wrapper script to find host commands
   - name: host-command-wrapper
@@ -281,103 +496,92 @@ modules:
         cat > /app/bin/find-host-command << 'WRAPPER_EOF'
         #!/bin/bash
         # Wrapper to find commands in host or flatpak
-        CMD="$1"
+        CMD="\$1"
         
         # Try various locations
-        for path in "/usr/bin/$CMD" "/bin/$CMD" "/app/bin/$CMD" "/var/run/host/usr/bin/$CMD" "/run/host/usr/bin/$CMD"; do
-          if [ -x "$path" ]; then
-            echo "$path"
+        for path in "/usr/bin/\$CMD" "/bin/\$CMD" "/app/bin/\$CMD" "/var/run/host/usr/bin/\$CMD" "/run/host/usr/bin/\$CMD"; do
+          if [ -x "\$path" ]; then
+            echo "\$path"
             exit 0
           fi
         done
         
         # Fallback to PATH
-        which "$CMD" 2>/dev/null || echo "$CMD"
+        which "\$CMD" 2>/dev/null || echo "\$CMD"
         WRAPPER_EOF
       - chmod +x /app/bin/find-host-command
     sources: []
 
-  # Main application
+  # Main application - downloads from GitHub
   - name: audioshare
     buildsystem: simple
     build-commands:
-      # Install Python scripts
+      # Install scripts
       - install -Dm755 audioshare.sh /app/bin/audioshare.sh
       - install -Dm755 advanced-mode.sh /app/bin/advanced-mode.sh
       - install -Dm755 volume-control.sh /app/bin/volume-control.sh
       - install -Dm755 graph.sh /app/bin/graph.sh
+      - install -Dm755 connect-outputs-to-inputs.sh /app/bin/connect-outputs-to-inputs.sh
+      - install -Dm755 outputs-to-inputs.py /app/bin/outputs-to-inputs.py
       
       # Install desktop file
-      - install -Dm644 com.audioshare.AudioConnectionManager.desktop /app/share/applications/com.audioshare.AudioConnectionManager.desktop
+      - install -Dm644 ${APP_ID}.desktop /app/share/applications/${APP_ID}.desktop
       
       # Install appdata
-      - install -Dm644 com.audioshare.AudioConnectionManager.appdata.xml /app/share/metainfo/com.audioshare.AudioConnectionManager.appdata.xml
+      - install -Dm644 ${APP_ID}.appdata.xml /app/share/metainfo/${APP_ID}.appdata.xml
       
-      # Install icon (required)
-      - install -Dm644 com.audioshare.AudioConnectionManager.png /app/share/icons/hicolor/256x256/apps/com.audioshare.AudioConnectionManager.png
+      # Install icon at multiple resolutions
+      - install -Dm644 ${APP_ID}.png /app/share/icons/hicolor/256x256/apps/${APP_ID}.png
+      - install -Dm644 ${APP_ID}.png /app/share/icons/hicolor/128x128/apps/${APP_ID}.png
+      - install -Dm644 ${APP_ID}.png /app/share/icons/hicolor/64x64/apps/${APP_ID}.png
     
     sources:
+      # Download scripts directly from GitHub
       - type: file
-        path: src/audioshare.sh
+        url: ${GITHUB_BASE_URL}/audioshare.sh
+        sha256: ${AUDIOSHARE_HASH}
+        dest-filename: audioshare.sh
+      
       - type: file
-        path: src/advanced-mode.sh
+        url: ${GITHUB_BASE_URL}/advanced-mode.sh
+        sha256: ${ADVANCED_HASH}
+        dest-filename: advanced-mode.sh
+      
       - type: file
-        path: src/volume-control.sh
+        url: ${GITHUB_BASE_URL}/volume-control.sh
+        sha256: ${VOLUME_HASH}
+        dest-filename: volume-control.sh
+      
       - type: file
-        path: src/graph.sh
+        url: ${GITHUB_BASE_URL}/graph.sh
+        sha256: ${GRAPH_HASH}
+        dest-filename: graph.sh
+      
       - type: file
-        path: files/com.audioshare.AudioConnectionManager.desktop
+        url: ${GITHUB_BASE_URL}/connect-outputs-to-inputs.sh
+        sha256: ${CONNECT_OUTPUTS_HASH}
+        dest-filename: connect-outputs-to-inputs.sh
+      
       - type: file
-        path: files/com.audioshare.AudioConnectionManager.appdata.xml
+        url: ${GITHUB_BASE_URL}/outputs-to-inputs.py
+        sha256: ${OUTPUTS_TO_INPUTS_HASH}
+        dest-filename: outputs-to-inputs.py
+      
+      # Local metadata files (generated by build script)
       - type: file
-        path: files/com.audioshare.AudioConnectionManager.png
+        path: files/${APP_ID}.desktop
+      
+      - type: file
+        path: files/${APP_ID}.appdata.xml
+      
+      - type: file
+        path: files/${APP_ID}.png
 EOF
     
-    print_msg "Created Flatpak manifest"
-}
-
-# Step 8: Modify scripts for Flatpak compatibility
-modify_scripts() {
-    print_step "Step 8: Modifying Scripts for Flatpak"
-    
-    # Create a wrapper that checks both flatpak and host paths
-    local scripts=("audioshare.sh" "advanced-mode.sh" "volume-control.sh" "graph.sh")
-    
-    for script in "${scripts[@]}"; do
-        if [ -f "$BUILD_DIR/src/$script" ]; then
-            # Add shebang if not present
-            if ! head -n1 "$BUILD_DIR/src/$script" | grep -q "^#!"; then
-                print_warning "$script missing shebang, adding #!/usr/bin/env python3"
-                echo -e "#!/usr/bin/env python3\n$(cat "$BUILD_DIR/src/$script")" > "$BUILD_DIR/src/$script"
-            fi
-            
-            # Add app ID setup for GTK applications
-            if grep -q "class.*Gtk.Window" "$BUILD_DIR/src/$script"; then
-                print_msg "Patching $script for proper app ID and icon..."
-                
-                # For GTK3, we need to set the application name properly
-                # Find the line with "if __name__" and add GLib setup before it
-                sed -i '/if __name__/i\
-# Set application properties for proper dock icon\
-import gi\
-gi.require_version('"'"'Gtk'"'"', '"'"'3.0'"'"')\
-from gi.repository import GLib\
-GLib.set_prgname('"'"'com.audioshare.AudioConnectionManager'"'"')\
-GLib.set_application_name('"'"'Audio Connection Manager'"'"')\
-' "$BUILD_DIR/src/$script"
-                
-                # Also set icon name in window init (after set_border_width or similar initialization)
-                # Look for common initialization patterns and add icon setting
-                if grep -q "self.set_border_width" "$BUILD_DIR/src/$script"; then
-                    sed -i '/self.set_border_width/a\        self.set_icon_name('"'"'com.audioshare.AudioConnectionManager'"'"')' "$BUILD_DIR/src/$script"
-                elif grep -q "self.set_default_size" "$BUILD_DIR/src/$script"; then
-                    sed -i '0,/self.set_default_size/s//self.set_icon_name('"'"'com.audioshare.AudioConnectionManager'"'"')\n        self.set_default_size/' "$BUILD_DIR/src/$script"
-                fi
-            fi
-            
-            print_msg "Verified: $script"
-        fi
-    done
+    print_msg "Created Flatpak manifest with GitHub sources"
+    print_msg "  Branch: $GITHUB_BRANCH"
+    print_msg "  Repository: https://github.com/${GITHUB_USER}/${GITHUB_REPO}"
+    print_msg "  jq will be compiled and included in the Flatpak"
 }
 
 # Step 9: Build the Flatpak
@@ -387,6 +591,7 @@ build_flatpak() {
     cd "$BUILD_DIR"
     
     print_msg "Starting flatpak-builder (this may take a while)..."
+    print_msg "Note: Building jq from source will add a few minutes to the build time"
     
     if flatpak-builder --force-clean --repo="../$REPO_DIR" build "$APP_ID.yaml"; then
         print_msg "Build successful!"
@@ -459,9 +664,9 @@ create_bundle() {
 print_success() {
     print_step "Build Complete!"
     
-    echo -e "${GREEN}╔════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║${NC}  Audio Connection Manager Flatpak Build Complete!  ${GREEN}║${NC}"
-    echo -e "${GREEN}╚════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${GREEN}╔═══════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║${NC}  Audio Sharing Control Flatpak Build Complete!  ${GREEN}║${NC}"
+    echo -e "${GREEN}╚═══════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${BLUE}Next steps:${NC}"
     echo "  1. Run the application:"
@@ -481,6 +686,9 @@ print_success() {
         echo "  AudioConnectionManager-${VERSION}.flatpak"
         echo ""
     fi
+    
+    echo -e "${GREEN}Note:${NC} jq has been compiled and included in the Flatpak"
+    echo "      The icon has been installed at multiple resolutions"
 }
 
 # Clean build
@@ -496,10 +704,10 @@ main() {
     echo -e "${BLUE}"
     cat << "EOF"
     ╔═══════════════════════════════════════════════════════╗
-    ║  Audio Connection Manager - Flatpak Build Script     ║
+    ║  Audio Sharing Control - Flatpak Build Script     ║
+    ║                  (GitHub Version)                     ║
     ║                                                       ║
-    ║  This script will build and install a Flatpak        ║
-    ║  package for the Audio Connection Manager            ║
+    ║  Auto-installs dependencies and builds from GitHub   ║
     ╚═══════════════════════════════════════════════════════╝
 EOF
     echo -e "${NC}"
@@ -517,10 +725,27 @@ EOF
             echo "Usage: $0 [option]"
             echo ""
             echo "Options:"
-            echo "  (none)     Build and install Flatpak"
+            echo "  (none)     Build and install Flatpak from GitHub"
             echo "  --rebuild  Clean and rebuild"
             echo "  --clean    Clean build directories only"
             echo "  --help     Show this help"
+            echo ""
+            echo "Supported Distributions:"
+            echo "  - Ubuntu/Debian based"
+            echo "  - Fedora/RHEL/CentOS"
+            echo "  - Arch Linux based"
+            echo "  - openSUSE"
+            echo "  - Alpine Linux"
+            echo "  - Gentoo"
+            echo "  - Void Linux"
+            echo ""
+            echo "GitHub Repository:"
+            echo "  ${GITHUB_BASE_URL}"
+            echo ""
+            echo "What gets bundled:"
+            echo "  - jq (compiled from source for JSON processing)"
+            echo "  - All shell scripts and Python GUI"
+            echo "  - Icon at multiple resolutions"
             exit 0
             ;;
     esac
@@ -529,11 +754,11 @@ EOF
     check_dependencies
     check_runtime
     create_structure
+    download_and_hash
     create_desktop_file
     create_appdata
     create_icon
     create_manifest
-    modify_scripts
     build_flatpak
     create_repo
     install_flatpak
@@ -543,3 +768,4 @@ EOF
 
 # Run main function
 main "$@"
+
