@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=Audio Sharing Control
-Comment=Conecta ou desconecta o áudio do Firefox
-Exec=/home/francisco/audioshare.sh
-Icon=/home/francisco/audioshareicon.png
-Terminal=false
-Type=Application
-Categories=Utility;
