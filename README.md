@@ -4,10 +4,7 @@ Pipewire only
 
 
 
-Future modifications:
-- Create a script to only run and make it an app in the user desktop environment
-- select a logo for it
-- maybe someday make it a flatpak app
+Tips for use:
+- It works better for google meet because it removes the feedback, but the new functionality (No feedback) should work if the others don't.
+- In microsoft teams you'll have problem with audio feedback, but you can control it using the volume control a muting and unmuting everytime you want the person to listen something or not, or you should try the new function "No feedback". It's still a little buggy though.
 
-Script futura modifications:
-- Compartimentalize everything
