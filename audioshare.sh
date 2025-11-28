@@ -185,9 +185,6 @@ class MainWindow(Gtk.Window):
         btn_graph.connect("clicked", self.on_monitor_graph)
         vbox.pack_start(btn_graph, False, False, 0)
         
-        btn_no_feedback = Gtk.Button(label="No feedback (Alpha)")
-        btn_no_feedback.connect("clicked", self.on_no_feedback)
-        vbox.pack_start(btn_no_feedback, False, False, 0)
         
         # Separator
         vbox.pack_start(Gtk.Separator(), False, False, 5)
