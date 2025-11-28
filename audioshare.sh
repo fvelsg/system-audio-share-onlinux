@@ -139,7 +139,7 @@ class AudioConnectionManager:
 
 class MainWindow(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Audio Connection ManagerAAAAAAAAAAA")
+        super().__init__(title="Audio Connection Manager")
         self.set_border_width(10)
         self.set_default_size(450, 450)
         self.set_resizable(False)
