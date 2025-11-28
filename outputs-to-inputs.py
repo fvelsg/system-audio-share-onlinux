@@ -131,6 +131,10 @@ class AudioMixerGUI(Gtk.Window):
         advanced_button.connect("clicked", self.on_advanced_clicked)
         bottom_box.pack_start(advanced_button, False, False, 0)
         
+        legacy_button = Gtk.Button(label="Legacy App")
+        legacy_button.connect("clicked", self.on_legacy_clicked)
+        bottom_box.pack_start(legacy_button, False, False, 0)
+        
         # Spacer
         bottom_box.pack_start(Gtk.Label(), True, True, 0)
         
@@ -165,6 +169,20 @@ class AudioMixerGUI(Gtk.Window):
             return None
         
         return script_path
+    
+    def get_legacy_script_path(self):
+        """Get the path to the legacy audioshare script"""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Try multiple possible file names
+        possible_names = ["audioshare.sh", "audioshare.py", "audioshare"]
+        
+        for name in possible_names:
+            script_path = os.path.join(script_dir, name)
+            if os.path.exists(script_path):
+                return script_path
+        
+        return None
     
     def check_mixer_status(self):
         """Check if virtual mixer exists and update UI"""
@@ -508,6 +526,45 @@ class AudioMixerGUI(Gtk.Window):
             Gtk.main_quit()
         except Exception as e:
             self.show_error_dialog(f"Failed to open advanced mode: {e}")
+    
+    def on_legacy_clicked(self, button):
+        """Open legacy audioshare app"""
+        legacy_path = self.get_legacy_script_path()
+        if not legacy_path:
+            self.show_error_dialog("Legacy app script not found\n\nLooking for: audioshare.sh, audioshare.py, or audioshare")
+            return
+        
+        try:
+            # Detect file type and run appropriately
+            if legacy_path.endswith('.py'):
+                # Python file
+                subprocess.Popen(["python3", legacy_path])
+            elif legacy_path.endswith('.sh'):
+                # Check if it's actually a Python file with wrong extension
+                with open(legacy_path, 'r') as f:
+                    first_line = f.readline().strip()
+                
+                if 'python' in first_line or 'import' in first_line:
+                    # It's Python code
+                    subprocess.Popen(["python3", legacy_path])
+                else:
+                    # It's a bash script
+                    subprocess.Popen(["bash", legacy_path])
+            else:
+                # No extension, check shebang
+                with open(legacy_path, 'r') as f:
+                    first_line = f.readline().strip()
+                
+                if 'python' in first_line:
+                    subprocess.Popen(["python3", legacy_path])
+                else:
+                    subprocess.Popen([legacy_path])
+            
+            # Close this GUI
+            self.cleanup()
+            Gtk.main_quit()
+        except Exception as e:
+            self.show_error_dialog(f"Failed to open legacy app: {e}")
     
     def on_quit_clicked(self, button):
         """Quit application"""
