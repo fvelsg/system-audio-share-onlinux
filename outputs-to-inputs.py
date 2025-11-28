@@ -18,6 +18,7 @@ class AudioMixerGUI(Gtk.Window):
         super().__init__(title="Audio Mixer Manager")
         self.set_default_size(650, 600)
         self.set_border_width(10)
+        self.set_resizable(False)  # Make window non-resizable like graph.sh
         
         # State variables
         self.monitor_process = None
@@ -25,6 +26,7 @@ class AudioMixerGUI(Gtk.Window):
         self.mixer_exists = False
         self.step_percentage = 20
         self.is_muted = False
+        self.graph_process = None
         
         # Main container
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -77,6 +79,11 @@ class AudioMixerGUI(Gtk.Window):
         self.mute_button = Gtk.Button(label="🔇 Mute")
         self.mute_button.connect("clicked", self.on_toggle_mute)
         volume_box.pack_start(self.mute_button, False, False, 0)
+        
+        # Open Graph Monitor button
+        self.graph_button = Gtk.Button(label="📊 Open Waveform Monitor")
+        self.graph_button.connect("clicked", self.on_open_graph)
+        volume_box.pack_start(self.graph_button, False, False, 0)
         
         # Step configuration
         step_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -190,6 +197,84 @@ class AudioMixerGUI(Gtk.Window):
             return None
         
         return script_path
+    
+    def get_graph_script_path(self):
+        """Get the path to the graph.sh script"""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(script_dir, "graph.sh")
+        
+        if not os.path.exists(script_path):
+            return None
+        
+        return script_path
+    
+    def on_open_graph(self, button):
+        """Open the waveform monitor graph"""
+        # Check if graph is already running
+        if self.graph_process and self.graph_process.poll() is None:
+            self.log_message("Waveform monitor is already open")
+            return
+        
+        graph_path = self.get_graph_script_path()
+        if not graph_path:
+            self.show_error_dialog("graph.sh not found in the same directory as this script")
+            self.log_message("ERROR: graph.sh not found")
+            return
+        
+        # Check if mixer exists
+        if not self.mixer_exists:
+            self.show_mixer_warning_dialog(graph_path)
+            return
+        
+        try:
+            self.log_message("Opening waveform monitor with AudioMixer device...")
+            self.graph_process = subprocess.Popen(
+                ["python3", graph_path, "--device", "AudioMixer_Virtual.monitor"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.log_message("✓ Waveform monitor opened for AudioMixer_Virtual.monitor")
+        except Exception as e:
+            self.show_error_dialog(f"Failed to open waveform monitor: {e}")
+            self.log_message(f"ERROR: Failed to open graph: {e}")
+    
+    def show_mixer_warning_dialog(self, graph_path):
+        """Show warning dialog when mixer doesn't exist"""
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Audio Mixer Not Created"
+        )
+        dialog.format_secondary_text(
+            "The AudioMixer_Virtual device needs to be created before opening the waveform monitor with it.\n\n"
+            "Would you like to open the waveform monitor without specifying a device?"
+        )
+        
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Open Without Device", Gtk.ResponseType.YES)
+        dialog.add_button("Create Mixer First", Gtk.ResponseType.NO)
+        
+        response = dialog.run()
+        dialog.destroy()
+        
+        if response == Gtk.ResponseType.YES:
+            # Open graph without device parameter
+            try:
+                self.log_message("Opening waveform monitor without device parameter...")
+                self.graph_process = subprocess.Popen(
+                    ["python3", graph_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                self.log_message("✓ Waveform monitor opened (default device)")
+            except Exception as e:
+                self.show_error_dialog(f"Failed to open waveform monitor: {e}")
+                self.log_message(f"ERROR: Failed to open graph: {e}")
+        elif response == Gtk.ResponseType.NO:
+            # User wants to create mixer first
+            self.log_message("Please create the Audio Mixer first, then open the waveform monitor")
     
     def check_mixer_status(self):
         """Check if virtual mixer exists"""
@@ -544,6 +629,10 @@ class AudioMixerGUI(Gtk.Window):
                     self.monitor_process.kill()
                 except:
                     pass
+        
+        # Don't kill graph process - let it run independently
+        if self.graph_process and self.graph_process.poll() is None:
+            self.log_message("Waveform monitor will continue running")
 
 def main():
     # Check dependencies

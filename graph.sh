@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Real-time Audio Waveform Monitor
-Monitors PulseAudio default sink and displays waveform visualization
+Monitors PulseAudio sources and displays waveform visualization
 """
 
 import gi
@@ -11,12 +11,47 @@ import subprocess
 import struct
 import sys
 import os
+import argparse
 
 class AudioMonitor:
     def __init__(self):
         self.process = None
         self.paused = False
         
+    def get_available_sources(self):
+        """Get all available audio sources (monitors and inputs)"""
+        try:
+            result = subprocess.run(['pactl', 'list', 'sources', 'short'], 
+                                  capture_output=True, text=True, check=True)
+            sources = []
+            for line in result.stdout.strip().split('\n'):
+                if line:
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        source_name = parts[1]
+                        # Get a friendly description
+                        description = self.get_source_description(source_name)
+                        sources.append((source_name, description))
+            return sources
+        except subprocess.CalledProcessError:
+            return []
+    
+    def get_source_description(self, source_name):
+        """Get a human-readable description for a source"""
+        try:
+            result = subprocess.run(['pactl', 'list', 'sources'], 
+                                  capture_output=True, text=True, check=True)
+            lines = result.stdout.split('\n')
+            found_source = False
+            for i, line in enumerate(lines):
+                if f'Name: {source_name}' in line:
+                    found_source = True
+                elif found_source and 'Description:' in line:
+                    return line.split('Description:', 1)[1].strip()
+            return source_name
+        except subprocess.CalledProcessError:
+            return source_name
+    
     def get_default_sink(self):
         """Get the default sink monitor name"""
         try:
@@ -183,7 +218,7 @@ class WaveformWidget(Gtk.DrawingArea):
         cr.stroke()
 
 class AudioVisualizerWindow(Gtk.Window):
-    def __init__(self):
+    def __init__(self, initial_source=None):
         super().__init__(title="Audio Waveform Monitor")
         self.set_default_size(900, 500)
         self.set_border_width(10)
@@ -192,10 +227,15 @@ class AudioVisualizerWindow(Gtk.Window):
         self.monitor = AudioMonitor()
         self.buffer_size = 2205  # Reduced to 0.05 seconds at 44100 Hz (was 0.1s)
         self.timeout_id = None
+        self.current_source = initial_source
         
         # Main container
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.add(vbox)
+        
+        # Audio source selector
+        source_box = self.create_source_selector()
+        vbox.pack_start(source_box, False, False, 0)
         
         # Waveform display
         self.waveform = WaveformWidget()
@@ -211,6 +251,52 @@ class AudioVisualizerWindow(Gtk.Window):
         self.start_monitoring()
         
         self.connect('destroy', self.on_destroy)
+    
+    def create_source_selector(self):
+        """Create the audio source selection dropdown"""
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        
+        label = Gtk.Label(label="Audio Source:")
+        hbox.pack_start(label, False, False, 0)
+        
+        # Create combo box for source selection
+        self.source_combo = Gtk.ComboBoxText()
+        self.source_combo.set_size_request(400, -1)
+        
+        # Populate with available sources
+        sources = self.monitor.get_available_sources()
+        for source_name, description in sources:
+            self.source_combo.append(source_name, description)
+        
+        # Set initial source based on parameter or default
+        if self.current_source:
+            # Try to set the specified source
+            self.source_combo.set_active_id(self.current_source)
+            # If that failed (source not found), fall back to default
+            if self.source_combo.get_active_id() is None:
+                print(f"Warning: Source '{self.current_source}' not found, using default")
+                self.current_source = None
+        
+        if not self.current_source:
+            # Set default to the default sink monitor
+            default_source = self.monitor.get_default_sink()
+            if default_source:
+                self.source_combo.set_active_id(default_source)
+                self.current_source = default_source
+            elif sources:
+                # Fall back to first available source
+                self.source_combo.set_active(0)
+                self.current_source = sources[0][0]
+        
+        self.source_combo.connect('changed', self.on_source_changed)
+        hbox.pack_start(self.source_combo, True, True, 0)
+        
+        # Refresh button
+        refresh_button = Gtk.Button(label="🔄 Refresh")
+        refresh_button.connect('clicked', self.on_refresh_sources)
+        hbox.pack_start(refresh_button, False, False, 0)
+        
+        return hbox
     
     def create_controls(self):
         grid = Gtk.Grid()
@@ -283,20 +369,19 @@ class AudioVisualizerWindow(Gtk.Window):
         return grid
     
     def start_monitoring(self):
-        monitor_name = self.monitor.get_default_sink()
-        if not monitor_name:
+        if not self.current_source:
             dialog = Gtk.MessageDialog(
                 transient_for=self,
                 flags=0,
                 message_type=Gtk.MessageType.ERROR,
                 buttons=Gtk.ButtonsType.OK,
-                text="Cannot find default audio sink"
+                text="No audio source available"
             )
             dialog.run()
             dialog.destroy()
             return
         
-        self.monitor.start_capture(monitor_name)
+        self.monitor.start_capture(self.current_source)
         # Reduced update interval from 100ms to 50ms for faster response
         self.timeout_id = GLib.timeout_add(50, self.update_waveform)
     
@@ -335,13 +420,78 @@ class AudioVisualizerWindow(Gtk.Window):
         self.waveform.dark_theme = not self.waveform.dark_theme
         self.waveform.queue_draw()
     
+    def on_source_changed(self, combo):
+        """Handle audio source change"""
+        source_name = combo.get_active_id()
+        if source_name and source_name != self.current_source:
+            self.current_source = source_name
+            # Restart monitoring with new source
+            self.monitor.stop_capture()
+            self.monitor.start_capture(source_name)
+            # Clear waveform history
+            self.waveform.history = []
+    
+    def on_refresh_sources(self, button):
+        """Refresh the list of available audio sources"""
+        current_selection = self.source_combo.get_active_id()
+        
+        # Clear existing items
+        self.source_combo.remove_all()
+        
+        # Repopulate
+        sources = self.monitor.get_available_sources()
+        for source_name, description in sources:
+            self.source_combo.append(source_name, description)
+        
+        # Try to restore previous selection
+        if current_selection:
+            self.source_combo.set_active_id(current_selection)
+        elif sources:
+            self.source_combo.set_active(0)
+    
     def on_destroy(self, widget):
         if self.timeout_id:
             GLib.source_remove(self.timeout_id)
         self.monitor.stop_capture()
         Gtk.main_quit()
 
+def list_sources():
+    """List all available audio sources"""
+    monitor = AudioMonitor()
+    sources = monitor.get_available_sources()
+    
+    if not sources:
+        print("No audio sources found.")
+        return
+    
+    print("Available audio sources:")
+    print("-" * 80)
+    for source_name, description in sources:
+        print(f"  {source_name}")
+        print(f"    → {description}")
+        print()
+
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='Real-time Audio Waveform Monitor',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s                                    # Use default audio source
+  %(prog)s -d alsa_output.pci-0000_00_1f.3.analog-stereo.monitor
+  %(prog)s --device my-device-name
+  %(prog)s --list                             # List all available sources
+        ''')
+    
+    parser.add_argument('-d', '--device', 
+                        help='Audio source device name to monitor')
+    parser.add_argument('-l', '--list', 
+                        action='store_true',
+                        help='List all available audio sources and exit')
+    
+    args = parser.parse_args()
+    
     # Check for required dependencies
     try:
         subprocess.run(['pactl', '--version'], capture_output=True, check=True)
@@ -351,7 +501,13 @@ def main():
         print("Install with: sudo apt install pulseaudio-utils")
         sys.exit(1)
     
-    win = AudioVisualizerWindow()
+    # Handle --list option
+    if args.list:
+        list_sources()
+        sys.exit(0)
+    
+    # Start the GUI with optional device specification
+    win = AudioVisualizerWindow(initial_source=args.device)
     win.show_all()
     Gtk.main()
 
