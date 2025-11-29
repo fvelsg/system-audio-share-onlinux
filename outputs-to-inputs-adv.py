@@ -22,8 +22,6 @@ import sys
 GLib.set_prgname("com.audioshare.AudioConnectionManager")
 GLib.set_application_name("Audio Sharing Control")
 
-# In the Window __init__, add:
-self.set_icon_name("com.audioshare.AudioConnectionManager")
 
 #------------------------------------------------------------------------
 
@@ -31,6 +29,11 @@ self.set_icon_name("com.audioshare.AudioConnectionManager")
 class AudioMixerGUI(Gtk.Window):
     def __init__(self):
         super().__init__(title="Audio Mixer Manager")
+
+        # In the Window __init__, add:
+        self.set_icon_name("com.audioshare.AudioConnectionManager")
+        
+        
         self.set_default_size(650, 600)
         self.set_border_width(10)
         self.set_resizable(False)  # Make window non-resizable like graph.sh

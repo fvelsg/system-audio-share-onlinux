@@ -22,8 +22,7 @@ import sys
 GLib.set_prgname("com.audioshare.AudioConnectionManager")
 GLib.set_application_name("Audio Sharing Control")
 
-# In the Window __init__, add:
-self.set_icon_name("com.audioshare.AudioConnectionManager")
+
 
 #------------------------------------------------------------------------
 
@@ -131,6 +130,11 @@ class AudioMonitor:
 class WaveformWidget(Gtk.DrawingArea):
     def __init__(self):
         super().__init__()
+
+        # In the Window __init__, add:
+        self.set_icon_name("com.audioshare.AudioConnectionManager")
+
+
         self.samples = []
         self.amplitude = 1.0
         self.dark_theme = True
@@ -235,6 +239,10 @@ class WaveformWidget(Gtk.DrawingArea):
 class AudioVisualizerWindow(Gtk.Window):
     def __init__(self, initial_source=None):
         super().__init__(title="Audio Waveform Monitor")
+
+        # In the Window __init__, add:
+        self.set_icon_name("com.audioshare.AudioConnectionManager")
+
         self.set_default_size(900, 500)
         self.set_border_width(10)
         self.set_resizable(False)  # Make it float like volume control

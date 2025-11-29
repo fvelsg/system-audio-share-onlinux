@@ -14,14 +14,16 @@ import sys
 GLib.set_prgname("com.audioshare.AudioConnectionManager")
 GLib.set_application_name("Audio Sharing Control")
 
-# In the Window __init__, add:
-self.set_icon_name("com.audioshare.AudioConnectionManager")
 
 #------------------------------------------------------------------------
 
 class PortConnectionManager(Gtk.Window):
     def __init__(self):
         super().__init__(title="Advanced Port Connection Manager")
+        #------------- Window Solution--------------------
+        self.set_icon_name("com.audioshare.AudioConnectionManager")
+        #---------------------------------------------------
+
         self.set_border_width(15)
         self.set_default_size(800, 600)
         self.set_resizable(False)  # Match volume control - non-resizable

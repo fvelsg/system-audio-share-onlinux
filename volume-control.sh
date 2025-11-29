@@ -22,6 +22,10 @@ self.set_icon_name("com.audioshare.AudioConnectionManager")
 class MonitorVolumeControl(Gtk.Window):
     def __init__(self):
         super().__init__(title="Monitor Volume Control")
+
+        # In the Window __init__, add:
+        self.set_icon_name("com.audioshare.AudioConnectionManager")
+
         self.set_border_width(15)
         self.set_default_size(350, 280)
         self.set_resizable(False)

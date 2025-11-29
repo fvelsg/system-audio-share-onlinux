@@ -22,8 +22,7 @@ import sys
 GLib.set_prgname("com.audioshare.AudioConnectionManager")
 GLib.set_application_name("Audio Sharing Control")
 
-# In the Window __init__, add:
-self.set_icon_name("com.audioshare.AudioConnectionManager")
+
 
 #------------------------------------------------------------------------
 
@@ -155,6 +154,10 @@ class AudioConnectionManager:
 class MainWindow(Gtk.Window):
     def __init__(self):
         super().__init__(title="Audio Connection Manager")
+
+        # In the Window __init__, add:
+        self.set_icon_name("com.audioshare.AudioConnectionManager")
+
         self.set_border_width(10)
         self.set_default_size(450, 450)
         self.set_resizable(False)
