@@ -24,7 +24,7 @@ REPO_DIR="flatpak-repo"
 # GitHub configuration
 GITHUB_USER="fvelsg"
 GITHUB_REPO="system-audio-share-onlinux"
-GITHUB_BRANCH="second-branch"
+GITHUB_BRANCH="third-branch"
 GITHUB_BASE_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
 # Print colored message
