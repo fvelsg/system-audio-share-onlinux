@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Real-time Audio Waveform Monitor
-Monitors PulseAudio sources and displays waveform visualization
+FIXED: Proper application ID for dock grouping
 """
 
 import gi
@@ -13,19 +13,9 @@ import sys
 import os
 import argparse
 
-#------------------Window Solution----------------------------------
-
-# Add this after gi.require_version and imports
-import sys
-
-# Set application ID to match desktop file
+# CRITICAL: Set application ID for dock grouping (BEFORE any GTK objects)
 GLib.set_prgname("com.audioshare.AudioConnectionManager")
 GLib.set_application_name("Audio Sharing Control")
-
-
-
-#------------------------------------------------------------------------
-
 
 class AudioMonitor:
     def __init__(self):
@@ -43,7 +33,6 @@ class AudioMonitor:
                     parts = line.split('\t')
                     if len(parts) >= 2:
                         source_name = parts[1]
-                        # Get a friendly description
                         description = self.get_source_description(source_name)
                         sources.append((source_name, description))
             return sources
@@ -81,20 +70,18 @@ class AudioMonitor:
         if self.process:
             self.stop_capture()
         
-        # Use parec to capture raw audio data with reduced latency settings
         cmd = ['parec', 
                '--device', monitor_name, 
                '--format=s16le', 
                '--rate=44100', 
                '--channels=1',
-               '--latency-msec=50']  # Set low latency
+               '--latency-msec=50']
         
         self.process = subprocess.Popen(cmd, 
                                        stdout=subprocess.PIPE, 
                                        stderr=subprocess.DEVNULL,
-                                       bufsize=0)  # Disable buffering
+                                       bufsize=0)
         
-        # Make the pipe non-blocking to avoid read delays
         import fcntl
         flags = fcntl.fcntl(self.process.stdout, fcntl.F_GETFL)
         fcntl.fcntl(self.process.stdout, fcntl.F_SETFL, flags | os.O_NONBLOCK)
@@ -112,17 +99,13 @@ class AudioMonitor:
             return [0] * num_samples
         
         try:
-            # Read raw bytes (2 bytes per sample for s16le)
             data = self.process.stdout.read(num_samples * 2)
             if not data or len(data) < num_samples * 2:
                 return [0] * num_samples
             
-            # Unpack as signed 16-bit integers
             samples = struct.unpack(f'{num_samples}h', data)
-            # Normalize to -1.0 to 1.0
             return [s / 32768.0 for s in samples]
         except BlockingIOError:
-            # No data available yet
             return [0] * num_samples
         except:
             return [0] * num_samples
@@ -130,18 +113,14 @@ class AudioMonitor:
 class WaveformWidget(Gtk.DrawingArea):
     def __init__(self):
         super().__init__()
-
-        # In the Window __init__, add:
-        self.set_icon_name("com.audioshare.AudioConnectionManager")
-
-
+        # NOTE: Do NOT set icon here - this is a DrawingArea, not a Window!
         self.samples = []
         self.amplitude = 1.0
         self.dark_theme = True
-        self.wave_color = (0.2, 0.8, 0.2)  # Green by default
+        self.wave_color = (0.2, 0.8, 0.2)
         self.wave_thickness = 2.0
-        self.history = []  # Store historical waveform data
-        self.max_history = 800  # Number of vertical bars to keep
+        self.history = []
+        self.max_history = 800
         
         self.connect('draw', self.on_draw)
         self.set_size_request(800, 300)
@@ -150,14 +129,9 @@ class WaveformWidget(Gtk.DrawingArea):
         if not samples:
             return
         
-        # Calculate RMS (Root Mean Square) for amplitude of this chunk
         rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
-        
-        # Add to history
         self.history.append(rms)
         
-        # Keep only max_history items (scroll effect)
-        # Trim from the front to always show the most recent data
         while len(self.history) > self.max_history:
             self.history.pop(0)
         
@@ -184,53 +158,38 @@ class WaveformWidget(Gtk.DrawingArea):
         cr.line_to(width, height / 2)
         cr.stroke()
         
-        # Draw waveform bars (audio recording style)
+        # Draw waveform bars
         if not self.history:
             return
         
         cr.set_source_rgb(*self.wave_color)
         
-        # Calculate bar width - allow fractional values for thin bars
         bar_width = width / self.max_history
         middle = height / 2
         
-        # Optimize drawing based on bar width
         if bar_width >= 1.0:
-            # Normal mode: draw individual bars
             for i, amplitude in enumerate(self.history):
                 x = i * bar_width
-                
-                # Scale amplitude with user control
                 scaled_amp = amplitude * self.amplitude * middle * 0.9
-                
-                # Draw vertical bar from center
                 cr.set_line_width(self.wave_thickness)
                 cr.move_to(x, middle - scaled_amp)
                 cr.line_to(x, middle + scaled_amp)
                 cr.stroke()
         else:
-            # Thin bar mode: draw more efficiently with rectangles
-            # Use thinner line width for very dense waveforms
             effective_thickness = max(0.5, min(self.wave_thickness, bar_width))
-            
             for i, amplitude in enumerate(self.history):
                 x = i * bar_width
-                
-                # Scale amplitude with user control
                 scaled_amp = amplitude * self.amplitude * middle * 0.9
-                
-                # Draw as a thin rectangle for better performance
                 if scaled_amp > 0:
                     cr.rectangle(x, middle - scaled_amp, effective_thickness, scaled_amp * 2)
                     cr.fill()
         
-        # Draw scrolling position indicator (rightmost edge highlighted)
+        # Scrolling indicator
         if self.dark_theme:
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.3)
         else:
             cr.set_source_rgba(0.0, 0.0, 0.0, 0.3)
         cr.set_line_width(2)
-        # Use actual width to ensure indicator is at the right edge
         x_pos = min(len(self.history) * bar_width, width - 1)
         cr.move_to(x_pos, 0)
         cr.line_to(x_pos, height)
@@ -239,16 +198,16 @@ class WaveformWidget(Gtk.DrawingArea):
 class AudioVisualizerWindow(Gtk.Window):
     def __init__(self, initial_source=None):
         super().__init__(title="Audio Waveform Monitor")
-
-        # In the Window __init__, add:
+        
+        # CRITICAL: Set icon here for the Window (not in DrawingArea!)
         self.set_icon_name("com.audioshare.AudioConnectionManager")
-
+        
         self.set_default_size(900, 500)
         self.set_border_width(10)
-        self.set_resizable(False)  # Make it float like volume control
+        self.set_resizable(False)
         
         self.monitor = AudioMonitor()
-        self.buffer_size = 2205  # Reduced to 0.05 seconds at 44100 Hz (was 0.1s)
+        self.buffer_size = 2205
         self.timeout_id = None
         self.current_source = initial_source
         
@@ -282,39 +241,31 @@ class AudioVisualizerWindow(Gtk.Window):
         label = Gtk.Label(label="Audio Source:")
         hbox.pack_start(label, False, False, 0)
         
-        # Create combo box for source selection
         self.source_combo = Gtk.ComboBoxText()
         self.source_combo.set_size_request(400, -1)
         
-        # Populate with available sources
         sources = self.monitor.get_available_sources()
         for source_name, description in sources:
             self.source_combo.append(source_name, description)
         
-        # Set initial source based on parameter or default
         if self.current_source:
-            # Try to set the specified source
             self.source_combo.set_active_id(self.current_source)
-            # If that failed (source not found), fall back to default
             if self.source_combo.get_active_id() is None:
                 print(f"Warning: Source '{self.current_source}' not found, using default")
                 self.current_source = None
         
         if not self.current_source:
-            # Set default to the default sink monitor
             default_source = self.monitor.get_default_sink()
             if default_source:
                 self.source_combo.set_active_id(default_source)
                 self.current_source = default_source
             elif sources:
-                # Fall back to first available source
                 self.source_combo.set_active(0)
                 self.current_source = sources[0][0]
         
         self.source_combo.connect('changed', self.on_source_changed)
         hbox.pack_start(self.source_combo, True, True, 0)
         
-        # Refresh button
         refresh_button = Gtk.Button(label="🔄 Refresh")
         refresh_button.connect('clicked', self.on_refresh_sources)
         hbox.pack_start(refresh_button, False, False, 0)
@@ -405,7 +356,6 @@ class AudioVisualizerWindow(Gtk.Window):
             return
         
         self.monitor.start_capture(self.current_source)
-        # Reduced update interval from 100ms to 50ms for faster response
         self.timeout_id = GLib.timeout_add(50, self.update_waveform)
     
     def update_waveform(self):
@@ -448,25 +398,20 @@ class AudioVisualizerWindow(Gtk.Window):
         source_name = combo.get_active_id()
         if source_name and source_name != self.current_source:
             self.current_source = source_name
-            # Restart monitoring with new source
             self.monitor.stop_capture()
             self.monitor.start_capture(source_name)
-            # Clear waveform history
             self.waveform.history = []
     
     def on_refresh_sources(self, button):
         """Refresh the list of available audio sources"""
         current_selection = self.source_combo.get_active_id()
         
-        # Clear existing items
         self.source_combo.remove_all()
         
-        # Repopulate
         sources = self.monitor.get_available_sources()
         for source_name, description in sources:
             self.source_combo.append(source_name, description)
         
-        # Try to restore previous selection
         if current_selection:
             self.source_combo.set_active_id(current_selection)
         elif sources:
@@ -495,16 +440,15 @@ def list_sources():
         print()
 
 def main():
-    # Parse command line arguments
     parser = argparse.ArgumentParser(
         description='Real-time Audio Waveform Monitor',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  %(prog)s                                    # Use default audio source
+  %(prog)s
   %(prog)s -d alsa_output.pci-0000_00_1f.3.analog-stereo.monitor
   %(prog)s --device my-device-name
-  %(prog)s --list                             # List all available sources
+  %(prog)s --list
         ''')
     
     parser.add_argument('-d', '--device', 
@@ -515,7 +459,6 @@ Examples:
     
     args = parser.parse_args()
     
-    # Check for required dependencies
     try:
         subprocess.run(['pactl', '--version'], capture_output=True, check=True)
         subprocess.run(['parec', '--version'], capture_output=True, check=True)
@@ -524,12 +467,10 @@ Examples:
         print("Install with: sudo apt install pulseaudio-utils")
         sys.exit(1)
     
-    # Handle --list option
     if args.list:
         list_sources()
         sys.exit(0)
     
-    # Start the GUI with optional device specification
     win = AudioVisualizerWindow(initial_source=args.device)
     win.show_all()
     Gtk.main()
