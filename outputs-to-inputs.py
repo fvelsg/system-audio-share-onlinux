@@ -2,7 +2,7 @@
 """
 Simplified Audio Output-to-Input Connection GUI
 GTK interface for managing the virtual audio mixer with volume control
-FIXED: Proper subprocess cleanup with process groups
+FIXED: Proper subprocess cleanup without psutil dependency
 """
 
 import gi
@@ -13,7 +13,6 @@ import threading
 import os
 import signal
 import time
-import psutil  # For better process management
 
 class AudioMixerGUI(Gtk.Window):
     def __init__(self):
@@ -192,49 +191,29 @@ class AudioMixerGUI(Gtk.Window):
         return None
     
     def kill_process_tree(self, pid):
-        """Kill a process and all its children"""
+        """Kill a process and all its children using OS commands"""
         try:
-            parent = psutil.Process(pid)
-            children = parent.children(recursive=True)
+            # Use pkill to kill process group
+            # The negative PID kills the entire process group
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            time.sleep(0.5)
             
-            # Terminate children first
-            for child in children:
-                try:
-                    child.terminate()
-                except psutil.NoSuchProcess:
-                    pass
-            
-            # Terminate parent
+            # Check if still alive, then force kill
             try:
-                parent.terminate()
-            except psutil.NoSuchProcess:
-                pass
-            
-            # Wait for termination
-            gone, alive = psutil.wait_procs(children + [parent], timeout=2)
-            
-            # Force kill survivors
-            for p in alive:
-                try:
-                    p.kill()
-                except psutil.NoSuchProcess:
-                    pass
-                    
-        except psutil.NoSuchProcess:
-            pass
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # Already dead
+                
+        except ProcessLookupError:
+            pass  # Process doesn't exist
         except Exception as e:
-            print(f"Error killing process tree: {e}")
-    
-    def cleanup_launched_processes(self):
-        """Clean up all processes launched by this GUI"""
-        with self.state_lock:
-            for proc in self.launched_processes[:]:
-                try:
-                    if proc.poll() is None:  # Still running
-                        self.kill_process_tree(proc.pid)
-                    self.launched_processes.remove(proc)
-                except Exception as e:
-                    print(f"Error cleaning up process: {e}")
+            # Fallback: try killing just the main process
+            try:
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(0.3)
+                os.kill(pid, signal.SIGKILL)
+            except:
+                pass
     
     def check_mixer_status(self):
         """Check if virtual mixer exists and update UI"""
@@ -702,22 +681,6 @@ class AudioMixerGUI(Gtk.Window):
         # because those are meant to stay running
 
 def main():
-    # Check for psutil
-    try:
-        import psutil
-    except ImportError:
-        dialog = Gtk.MessageDialog(
-            message_type=Gtk.MessageType.ERROR,
-            buttons=Gtk.ButtonsType.OK,
-            text="Missing Python Module"
-        )
-        dialog.format_secondary_text(
-            "Please install psutil:\npip3 install psutil\n\nor\n\nsudo apt install python3-psutil"
-        )
-        dialog.run()
-        dialog.destroy()
-        return
-    
     # Check dependencies
     missing = []
     for cmd in ["pactl", "pw-link", "pw-dump", "jq"]:
