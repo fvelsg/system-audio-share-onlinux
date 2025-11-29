@@ -13,6 +13,21 @@ import os
 import signal
 import re
 
+#------------------Window Solution----------------------------------
+
+# Add this after gi.require_version and imports
+import sys
+
+# Set application ID to match desktop file
+GLib.set_prgname("com.audioshare.AudioConnectionManager")
+GLib.set_application_name("Audio Sharing Control")
+
+# In the Window __init__, add:
+self.set_icon_name("com.audioshare.AudioConnectionManager")
+
+#------------------------------------------------------------------------
+
+
 class AudioMixerGUI(Gtk.Window):
     def __init__(self):
         super().__init__(title="Audio Mixer Manager")
