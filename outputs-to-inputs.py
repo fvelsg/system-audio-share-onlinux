@@ -785,7 +785,15 @@ class AudioMixerGUI(Gtk.Window):
         
         self.close_monitor_window()
         
-
+        # Stop and cleanup audio monitor
+        if self.audio_monitor:
+            try:
+                self.audio_monitor.stop()
+                self.audio_monitor.cleanup()
+            except:
+                pass
+            self.audio_monitor = None
+        
         # Kill monitor process tree
         if self.monitor_process:
             try:
@@ -797,10 +805,22 @@ class AudioMixerGUI(Gtk.Window):
         if self.monitor_thread and self.monitor_thread.is_alive():
             self.monitor_thread.join(timeout=1)
         
-
+        # DELETE THE VIRTUAL MIXER on exit
+        script_path = self.get_script_path()
+        if script_path:
+            try:
+                subprocess.run(
+                    ["bash", script_path, "delete"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+            except Exception:
+                pass  # Best effort cleanup
+        
         # Note: We DON'T clean up launched_processes here
         # because those are meant to stay running
-    
+
 def main():
     # Check dependencies
     missing = []
