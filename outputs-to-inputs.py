@@ -8,11 +8,14 @@ FIXED: Proper subprocess cleanup without psutil dependency
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GLib, Pango
+from audio_monitor import AudioWaveformMonitor, AudioMonitor
 import subprocess
 import threading
 import os
 import signal
 import time
+
+
 
 #------------------Window Solution----------------------------------
 
@@ -49,11 +52,21 @@ class AudioMixerGUI(Gtk.Window):
         self.is_muted = False
         self.shutdown_flag = False
         self.state_lock = threading.Lock()
+        self.audio_monitor = None
+        self.monitor_visible = False
+        self.monitor_window = None
+        
+       
+
         
         # Main container
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
         self.add(vbox)
         
+        # Container for audio monitor (initially hidden)
+        self.monitor_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        vbox.pack_start(self.monitor_container, False, False, 0)
+
         # Title
         title_label = Gtk.Label()
         title_label.set_markup("<big><b>Virtual Audio Mixer</b></big>")
@@ -79,10 +92,12 @@ class AudioMixerGUI(Gtk.Window):
         
         self.connect_button = Gtk.Button(label="Connect")
         self.connect_button.connect("clicked", self.on_connect_clicked)
+        #self.connect_button.connect("clicked", self.on_monitor_clicked)
         button_box.pack_start(self.connect_button, True, True, 0)
         
         self.disconnect_button = Gtk.Button(label="Disconnect")
         self.disconnect_button.connect("clicked", self.on_disconnect_clicked)
+        #self.disconnect_button.connect("clicked", self.off_monitor_clicked)
         self.disconnect_button.set_sensitive(False)
         button_box.pack_start(self.disconnect_button, True, True, 0)
         
@@ -158,12 +173,13 @@ class AudioMixerGUI(Gtk.Window):
         legacy_button = Gtk.Button(label="Legacy App")
         legacy_button.connect("clicked", self.on_legacy_clicked)
         bottom_box.pack_start(legacy_button, False, False, 0)
-        
+
         # Spacer
         bottom_box.pack_start(Gtk.Label(), True, True, 0)
         
         quit_button = Gtk.Button(label="Quit")
         quit_button.connect("clicked", self.on_quit_clicked)
+        
         bottom_box.pack_end(quit_button, False, False, 0)
         
         vbox.pack_start(bottom_box, False, False, 0)
@@ -173,7 +189,9 @@ class AudioMixerGUI(Gtk.Window):
         
         # Connect window close event
         self.connect("destroy", self.on_window_destroy)
-    
+        
+        self.on_monitor_clicked(button=type("obj", (object,), {"set_label": lambda self, x: None})())
+
     def get_script_path(self):
         """Get the path to the bash script"""
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -481,14 +499,90 @@ class AudioMixerGUI(Gtk.Window):
                 self.connect_button.set_sensitive(False)
                 self.disconnect_button.set_sensitive(True)
                 self.set_volume_controls_sensitive(True)
-                
                 GLib.timeout_add(500, self.update_mute_state_from_system)
+
+                if self.monitor_visible and self.audio_monitor:
+                    self.audio_monitor.set_source("AudioMixer_Virtual.monitor")
+                
             else:
                 self.status_circle.set_markup('<span font="24">⚪</span>')
                 self.status_label.set_markup("<b>Disconnected</b>")
                 self.connect_button.set_sensitive(True)
                 self.disconnect_button.set_sensitive(False)
-    
+
+    def on_monitor_clicked(self, button=None):
+        """Toggle audio monitor visibility (compact embedded version)"""
+        try:
+            source = "AudioMixer_Virtual.monitor" if self.is_connected else None
+                
+            self.audio_monitor = AudioWaveformMonitor(
+                source=source,
+                amplitude=1.5,
+                color=(0.2, 0.8, 0.2),  # Green
+                dark_theme=True
+            )
+                
+            # Make the waveform widget compact (smaller height)
+            #self.audio_monitor.waveform.set_size_request(380, 80)
+            
+            
+            self.monitor_container.pack_start(self.audio_monitor, False, False, 0)
+            self.audio_monitor.show_all()
+            self.audio_monitor.start()
+                
+            button.set_label("Hide Monitor")
+            self.monitor_visible = True
+                
+            # Slightly increase window height only
+            current_width, current_height = self.get_size()
+            self.resize(current_width, current_height + 100)
+            self.audio_monitor.waveform.set_size_request(350, 60)
+                
+        except Exception as e:
+            self.show_error_dialog(f"Failed to start audio monitor: {e}")
+
+#    def off_monitor_clicked(self, button):
+#        """Toggle audio monitor visibility to off (compact embedded version)"""
+#        # Hide and destroy monitor
+#        if self.audio_monitor:
+#            self.audio_monitor.stop()
+#            self.audio_monitor.cleanup()
+#            self.monitor_container.remove(self.audio_monitor)
+#            self.audio_monitor = None
+            
+        # Shrink window back
+        current_width, current_height = self.get_size()
+        self.resize(current_width, current_height - 100)
+
+
+    def on_monitor_window_closed(self, widget):
+        """Handle monitor window being closed by user"""
+        if self.audio_monitor:
+            self.audio_monitor.stop()
+            self.audio_monitor.cleanup()
+            self.audio_monitor = None
+        
+        self.monitor_window = None
+        self.monitor_visible = False
+        
+        # Update button label (find the button in bottom_box)
+        # Use idle_add to safely update UI
+        GLib.idle_add(self.reset_monitor_button_label)
+
+    def close_monitor_window(self):
+        """Close the monitor window and clean up"""
+        if self.audio_monitor:
+            self.audio_monitor.stop()
+            self.audio_monitor.cleanup()
+            self.audio_monitor = None
+        
+        if self.monitor_window:
+            self.monitor_window.destroy()
+            self.monitor_window = None
+        
+        self.monitor_visible = False
+
+
     def on_monitor_stopped_unexpectedly(self):
         """Handle monitor stopping unexpectedly"""
         with self.state_lock:
@@ -576,6 +670,11 @@ class AudioMixerGUI(Gtk.Window):
                 self.connect_button.set_sensitive(True)
                 self.disconnect_button.set_sensitive(False)
                 self.set_volume_controls_sensitive(False)
+                if self.monitor_visible and self.audio_monitor:
+                    monitor = AudioMonitor()
+                    default = monitor.get_default_sink_monitor()
+                    if default:
+                        self.audio_monitor.set_source(default)                
             else:
                 self.status_circle.set_markup('<span font="24">🔴</span>')
                 self.status_label.set_markup("<b>Error</b>")
@@ -684,6 +783,9 @@ class AudioMixerGUI(Gtk.Window):
         with self.state_lock:
             self.shutdown_flag = True
         
+        self.close_monitor_window()
+        
+
         # Kill monitor process tree
         if self.monitor_process:
             try:
@@ -695,9 +797,10 @@ class AudioMixerGUI(Gtk.Window):
         if self.monitor_thread and self.monitor_thread.is_alive():
             self.monitor_thread.join(timeout=1)
         
+
         # Note: We DON'T clean up launched_processes here
         # because those are meant to stay running
-
+    
 def main():
     # Check dependencies
     missing = []
