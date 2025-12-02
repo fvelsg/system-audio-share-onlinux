@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PipeWire Audio Connection Manager with GTK GUI
+PipeWire Audio Connection Manager with GTK GUI (Legacy)
 Manages connections between default sink monitor and application inputs
 """
 
@@ -15,14 +15,9 @@ from gi.repository import Gtk, GLib
 
 #------------------Window Solution----------------------------------
 
-# Add this after gi.require_version and imports
-import sys
-
 # Set application ID to match desktop file
 GLib.set_prgname("com.audioshare.AudioConnectionManager")
 GLib.set_application_name("Audio Sharing Control")
-
-
 
 #------------------------------------------------------------------------
 
@@ -153,13 +148,11 @@ class AudioConnectionManager:
 
 class MainWindow(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Audio Connection Manager")
+        super().__init__(title="Audio Connection Manager (Legacy)")
 
-        # In the Window __init__, add:
         self.set_icon_name("com.audioshare.AudioConnectionManager")
-
         self.set_border_width(10)
-        self.set_default_size(450, 450)
+        self.set_default_size(450, 500)
         self.set_resizable(False)
         self.set_position(Gtk.WindowPosition.CENTER)
         
@@ -169,10 +162,32 @@ class MainWindow(Gtk.Window):
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.add(vbox)
         
-        # Title label
-        label = Gtk.Label()
-        label.set_markup("<big><b>Audio Connection Manager</b></big>")
-        vbox.pack_start(label, False, False, 0)
+        # Header with back button and title
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        vbox.pack_start(header_box, False, False, 0)
+        
+        # Back button
+        self.back_button = Gtk.Button(label="← Back")
+        self.back_button.set_tooltip_text("Return to Main Menu")
+        self.back_button.connect("clicked", self.on_back_clicked)
+        header_box.pack_start(self.back_button, False, False, 0)
+        
+        # Title (centered with expanding spacers)
+        header_box.pack_start(Gtk.Label(), True, True, 0)  # Left spacer
+        title_label = Gtk.Label()
+        title_label.set_markup("<big><b>Audio Connection Manager</b></big>")
+        header_box.pack_start(title_label, False, False, 0)
+        header_box.pack_start(Gtk.Label(), True, True, 0)  # Right spacer
+        
+        # Invisible placeholder to balance the back button
+        placeholder = Gtk.Label()
+        placeholder.set_size_request(70, -1)  # Same width as back button
+        header_box.pack_start(placeholder, False, False, 0)
+        
+        # Legacy mode indicator
+        legacy_label = Gtk.Label()
+        legacy_label.set_markup('<span foreground="gray"><i>(Legacy Mode)</i></span>')
+        vbox.pack_start(legacy_label, False, False, 0)
         
         # Description label
         desc = Gtk.Label(label="Connect default monitor to application inputs")
@@ -203,7 +218,6 @@ class MainWindow(Gtk.Window):
         btn_graph.connect("clicked", self.on_monitor_graph)
         vbox.pack_start(btn_graph, False, False, 0)
         
-        
         # Separator
         vbox.pack_start(Gtk.Separator(), False, False, 5)
         
@@ -213,6 +227,42 @@ class MainWindow(Gtk.Window):
         vbox.pack_end(btn_quit, False, False, 0)
         
         self.connect("destroy", Gtk.main_quit)
+    
+    def get_main_script_path(self):
+        """Get the path to the main menu script"""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        main_script = os.path.join(script_dir, "outputs-to-inputs.py")
+        
+        if not os.path.exists(main_script):
+            return None
+        
+        return main_script
+    
+    def on_back_clicked(self, button):
+        """Go back to the main menu"""
+        main_script = self.get_main_script_path()
+        
+        if not main_script:
+            self.show_error("Main script (outputs-to-inputs.py) not found!")
+            return
+        
+        try:
+            # Launch the main script
+            subprocess.Popen(
+                ["python3", main_script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            # Close this window after a brief delay
+            GLib.timeout_add(100, self.close_window)
+        except Exception as e:
+            self.show_error(f"Failed to launch main script: {e}")
+    
+    def close_window(self):
+        """Close the window gracefully"""
+        self.destroy()
+        Gtk.main_quit()
+        return False
     
     def show_error(self, message):
         """Show error dialog"""
@@ -315,22 +365,18 @@ class MainWindow(Gtk.Window):
     
     def on_advanced(self, button):
         """Launch the advanced-mode.sh script"""
-        # Get the directory where this script is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
         advanced_script = os.path.join(script_dir, 'advanced-mode.sh')
         
-        # Check if advanced-mode.sh exists
         if not os.path.exists(advanced_script):
             self.show_error(f"advanced-mode.sh not found!\n\nExpected location:\n{advanced_script}")
             return
         
-        # Check if advanced-mode.sh is executable
         if not os.access(advanced_script, os.X_OK):
             self.show_error(f"advanced-mode.sh is not executable!\n\nRun: chmod +x {advanced_script}")
             return
         
         try:
-            # Launch the script in the background
             subprocess.Popen([advanced_script], 
                            cwd=script_dir,
                            stdout=subprocess.DEVNULL,
@@ -340,22 +386,18 @@ class MainWindow(Gtk.Window):
     
     def on_volume_control(self, button):
         """Launch the volume-control.sh script"""
-        # Get the directory where this script is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
         volume_script = os.path.join(script_dir, 'volume-control.sh')
         
-        # Check if volume-control.sh exists
         if not os.path.exists(volume_script):
             self.show_error(f"volume-control.sh not found!\n\nExpected location:\n{volume_script}")
             return
         
-        # Check if volume-control.sh is executable
         if not os.access(volume_script, os.X_OK):
             self.show_error(f"volume-control.sh is not executable!\n\nRun: chmod +x {volume_script}")
             return
         
         try:
-            # Launch the script in the background
             subprocess.Popen([volume_script], 
                            cwd=script_dir,
                            stdout=subprocess.DEVNULL,
@@ -365,22 +407,18 @@ class MainWindow(Gtk.Window):
     
     def on_monitor_graph(self, button):
         """Launch the graph.sh script"""
-        # Get the directory where this script is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
         graph_script = os.path.join(script_dir, 'graph.sh')
         
-        # Check if graph.sh exists
         if not os.path.exists(graph_script):
             self.show_error(f"graph.sh not found!\n\nExpected location:\n{graph_script}")
             return
         
-        # Check if graph.sh is executable
         if not os.access(graph_script, os.X_OK):
             self.show_error(f"graph.sh is not executable!\n\nRun: chmod +x {graph_script}")
             return
         
         try:
-            # Launch the script in the background
             subprocess.Popen([graph_script], 
                            cwd=script_dir,
                            stdout=subprocess.DEVNULL,
