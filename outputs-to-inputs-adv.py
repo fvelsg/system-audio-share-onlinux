@@ -50,10 +50,27 @@ class AudioMixerGUI(Gtk.Window):
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.add(vbox)
         
-        # Title
+        # Header with back button and title
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        vbox.pack_start(header_box, False, False, 0)
+        
+        # Back button
+        self.back_button = Gtk.Button(label="← Back")
+        self.back_button.set_tooltip_text("Return to Main Menu")
+        self.back_button.connect("clicked", self.on_back_clicked)
+        header_box.pack_start(self.back_button, False, False, 0)
+        
+        # Title (centered with expanding spacers)
+        header_box.pack_start(Gtk.Label(), True, True, 0)  # Left spacer
         title_label = Gtk.Label()
         title_label.set_markup("<big><b>Virtual Audio Mixer Manager</b></big>")
-        vbox.pack_start(title_label, False, False, 0)
+        header_box.pack_start(title_label, False, False, 0)
+        header_box.pack_start(Gtk.Label(), True, True, 0)  # Right spacer
+        
+        # Invisible placeholder to balance the back button
+        placeholder = Gtk.Label()
+        placeholder.set_size_request(70, -1)  # Same width as back button
+        header_box.pack_start(placeholder, False, False, 0)
         
         # Status frame
         status_frame = Gtk.Frame(label="Status")
@@ -203,6 +220,44 @@ class AudioMixerGUI(Gtk.Window):
         
         self.log_message("Audio Mixer Manager started")
         self.log_message("Ready to manage virtual audio mixer")
+    
+    def get_main_script_path(self):
+        """Get the path to the main menu script"""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        main_script = os.path.join(script_dir, "outputs-to-inputs.py")
+        
+        if not os.path.exists(main_script):
+            return None
+        
+        return main_script
+    
+    def on_back_clicked(self, button):
+        """Go back to the main menu"""
+        main_script = self.get_main_script_path()
+        
+        if not main_script:
+            self.show_error_dialog("Main script (outputs-to-inputs.py) not found!")
+            return
+        
+        try:
+            # Launch the main script
+            subprocess.Popen(
+                ["python3", main_script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.log_message("Returning to main menu...")
+            # Close this window after a brief delay
+            GLib.timeout_add(100, self.close_window)
+        except Exception as e:
+            self.show_error_dialog(f"Failed to launch main script: {e}")
+    
+    def close_window(self):
+        """Close the window gracefully"""
+        self.cleanup()
+        self.destroy()
+        Gtk.main_quit()
+        return False
     
     def get_script_path(self):
         """Get the path to the bash script"""
