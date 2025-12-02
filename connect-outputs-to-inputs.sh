@@ -112,6 +112,110 @@ should_exclude_output() {
     return 1  # Should not exclude
 }
 
+
+# Disconnect all links to virtual mixer from apps that also have inputs
+# Uses pw-link -l output directly for accurate port names
+disconnect_excluded_outputs() {
+    local virtual_fl="$1"
+    local virtual_fr="$2"
+    shift 2
+    local input_apps=("$@")
+    
+    # Build list of input app first words
+    local input_first_words=""
+    for app in "${input_apps[@]}"; do
+        local first=$(echo "$app" | awk '{print tolower($1)}')
+        [ -n "$first" ] && input_first_words="$input_first_words|$first"
+    done
+    # Remove leading pipe
+    input_first_words="${input_first_words#|}"
+    
+    [ -z "$input_first_words" ] && return 0
+    
+    # Get ALL current links from pw-link -l
+    # Parse each line that contains our virtual mixer as destination
+    pw-link -l 2>/dev/null | while IFS= read -r line; do
+        # Must contain " -> " to be a link
+        echo "$line" | grep -qF " -> " || continue
+        
+        # Must go to our virtual mixer
+        echo "$line" | grep -qF "$VIRTUAL_SINK_NAME" || continue
+        
+        # Extract source (everything before " -> ", trimmed)
+        local src=$(echo "$line" | sed 's/[[:space:]]*->.*//' | sed 's/^[[:space:]]*//')
+        
+        # Skip if source is empty or is our own mixer (monitor)
+        [ -z "$src" ] && continue
+        echo "$src" | grep -qF "$VIRTUAL_SINK_NAME" && continue
+        
+        # Extract the app/node name (before the colon)
+        local src_node=$(echo "$src" | cut -d':' -f1)
+        local src_first=$(echo "$src_node" | awk '{print tolower($1)}')
+        
+        # Check if this matches any input app
+        if echo "$src_first" | grep -qwE "$input_first_words"; then
+            # Extract destination (everything after " -> ", trimmed)
+            local dst=$(echo "$line" | sed 's/.*->[[:space:]]*//')
+            
+            echo "  ✗ Disconnecting excluded: $src → $dst"
+            pw-link -d "$src" "$dst" 2>/dev/null
+        fi
+    done
+}
+
+# Alternative: Disconnect using link IDs for maximum reliability
+disconnect_excluded_outputs_by_id() {
+    local input_apps=("$@")
+    
+    # Build list of input app first words
+    local input_first_words=""
+    for app in "${input_apps[@]}"; do
+        local first=$(echo "$app" | awk '{print tolower($1)}')
+        [ -n "$first" ] && input_first_words="$input_first_words $first"
+    done
+    input_first_words=$(echo "$input_first_words" | xargs)  # trim
+    
+    [ -z "$input_first_words" ] && return 0
+    
+    # Get links with their IDs using pw-dump
+    pw-dump 2>/dev/null | jq -r --arg mixer "$VIRTUAL_SINK_NAME" '
+        . as $root |
+        .[] |
+        select(.type == "PipeWire:Interface:Link") |
+        .id as $link_id |
+        .info.props."link.output.port" as $out_port_id |
+        .info.props."link.input.port" as $in_port_id |
+        
+        # Find the input port and check if it belongs to our mixer
+        ($root[] | select(.type == "PipeWire:Interface:Port") | select(.id == $in_port_id)) as $in_port |
+        select(($in_port.info.props."node.name" // "") == $mixer) |
+        
+        # Find the output port
+        ($root[] | select(.type == "PipeWire:Interface:Port") | select(.id == $out_port_id)) as $out_port |
+        $out_port.info.props."node.id" as $out_node_id |
+        
+        # Find the output node
+        ($root[] | select(.type == "PipeWire:Interface:Node") | select(.id == $out_node_id)) as $out_node |
+        ($out_node.info.props."application.name" // $out_node.info.props."node.name" // "") as $app_name |
+        
+        # Output: link_id|app_name|output_port_alias
+        "\($link_id)|\($app_name)|\($out_port.info.props."port.alias" // "unknown")"
+    ' | while IFS='|' read -r link_id app_name port_alias; do
+        [ -z "$link_id" ] && continue
+        
+        local app_first=$(echo "$app_name" | awk '{print tolower($1)}')
+        
+        # Check if this app should be excluded
+        for input_first in $input_first_words; do
+            if [ "$app_first" = "$input_first" ]; then
+                echo "  ✗ Destroying link $link_id: $port_alias (app: $app_name)"
+                pw-link -d "$link_id" 2>/dev/null
+                break
+            fi
+        done
+    done
+}
+
 # Check if virtual sink exists
 virtual_sink_exists() {
     pactl list sinks short 2>/dev/null | grep -q "$VIRTUAL_SINK_NAME"
@@ -188,16 +292,17 @@ connect_output_to_virtual() {
     local virtual_fl="$2"
     local virtual_fr="$3"
     
-    # Extract port_id, alias, and app_name from the format "port_id|port_alias|app_name"
     local port_id=$(echo "$port_spec" | cut -d'|' -f1)
     local port_alias=$(echo "$port_spec" | cut -d'|' -f2)
     local app_name=$(echo "$port_spec" | cut -d'|' -f3)
     
-    # Use port_id for actual connection (unique), alias for display
     local connected=0
     
+    # FIX: Use port_alias for checking connections (pw-link -l shows names, not IDs)
+    # Still use port_id for actual pw-link command (IDs are unique)
+    
     # Check and connect FL
-    if ! ports_connected "$port_id" "$virtual_fl"; then
+    if ! ports_connected "$port_alias" "$virtual_fl"; then
         if timeout 3 pw-link "$port_id" "$virtual_fl" 2>/dev/null; then
             echo "  ✓ Connected: $port_alias → Virtual Mixer (L)"
             connected=1
@@ -205,7 +310,7 @@ connect_output_to_virtual() {
     fi
     
     # Check and connect FR
-    if ! ports_connected "$port_id" "$virtual_fr"; then
+    if ! ports_connected "$port_alias" "$virtual_fr"; then
         if timeout 3 pw-link "$port_id" "$virtual_fr" 2>/dev/null; then
             echo "  ✓ Connected: $port_alias → Virtual Mixer (R)"
             connected=1
@@ -221,16 +326,16 @@ connect_virtual_to_input() {
     local monitor_fl="$2"
     local monitor_fr="$3"
     
-    # Extract port_id, alias, and app_name from the format "port_id|port_alias|app_name"
     local port_id=$(echo "$port_spec" | cut -d'|' -f1)
     local port_alias=$(echo "$port_spec" | cut -d'|' -f2)
     local app_name=$(echo "$port_spec" | cut -d'|' -f3)
     
-    # Use port_id for actual connection (unique), alias for display
     local connected=0
     
+    # FIX: Use port_alias for checking connections
+    
     # Check and connect FL
-    if ! ports_connected "$monitor_fl" "$port_id"; then
+    if ! ports_connected "$monitor_fl" "$port_alias"; then
         if timeout 3 pw-link "$monitor_fl" "$port_id" 2>/dev/null; then
             echo "  ✓ Connected: Virtual Mixer → $port_alias (L)"
             connected=1
@@ -238,7 +343,7 @@ connect_virtual_to_input() {
     fi
     
     # Check and connect FR
-    if ! ports_connected "$monitor_fr" "$port_id"; then
+    if ! ports_connected "$monitor_fr" "$port_alias"; then
         if timeout 3 pw-link "$monitor_fr" "$port_id" 2>/dev/null; then
             echo "  ✓ Connected: Virtual Mixer → $port_alias (R)"
             connected=1
@@ -275,7 +380,9 @@ create_virtual_mixer() {
     fi
 }
 
-# FUNCTION 2: Monitor and auto-connect (IMPROVED)
+
+# FUNCTION 2: Monitor and auto-connect (FIXED VERSION)
+# FUNCTION 2: Monitor and auto-connect (FULLY FIXED VERSION)
 monitor_and_connect() {
     echo "=== Auto-Connect Monitor ==="
     echo ""
@@ -313,24 +420,23 @@ monitor_and_connect() {
     echo "  Monitor FR: $monitor_fr"
     echo ""
     
-    # Track known ports with timestamps
+    # Track known ports
     declare -A known_outputs
     declare -A known_inputs
-    declare -A output_timestamps
-    declare -A input_timestamps
     
-    # Connect existing ports
     echo "Connecting existing ports..."
     echo ""
     
-    # First, collect all input app names for exclusion checking
+    # Collect input app names
     local input_app_names=()
     while read -r port_spec; do
         [ -z "$port_spec" ] && continue
         local app_name=$(echo "$port_spec" | cut -d'|' -f3)
         input_app_names+=("$app_name")
+        echo "  [Found input app: $app_name]"
     done <<< "$(get_all_input_ports)"
     
+    echo ""
     echo "=== APP OUTPUTS → VIRTUAL MIXER ==="
     while read -r port_spec; do
         [ -z "$port_spec" ] && continue
@@ -338,14 +444,13 @@ monitor_and_connect() {
         local port_alias=$(echo "$port_spec" | cut -d'|' -f2)
         local app_name=$(echo "$port_spec" | cut -d'|' -f3)
         
-        # Check if this output should be excluded
         if should_exclude_output "$app_name" "${input_app_names[@]}"; then
             echo "  ⊗ Skipped: $port_alias (matches input app: $app_name)"
+            known_outputs["$port_spec"]=1
             continue
         fi
         
         known_outputs["$port_spec"]=1
-        output_timestamps["$port_spec"]=$(date +%s)
         connect_output_to_virtual "$port_spec" "$virtual_fl" "$virtual_fr"
     done <<< "$(get_all_output_ports)"
     
@@ -354,59 +459,61 @@ monitor_and_connect() {
     while read -r port_spec; do
         [ -z "$port_spec" ] && continue
         known_inputs["$port_spec"]=1
-        input_timestamps["$port_spec"]=$(date +%s)
         connect_virtual_to_input "$port_spec" "$monitor_fl" "$monitor_fr"
     done <<< "$(get_all_input_ports)"
+    
+    # IMPORTANT: Disconnect any links that shouldn't exist
+    # (handles case where connections were made before inputs were detected)
+    echo ""
+    echo "=== CHECKING FOR EXCLUDED CONNECTIONS ==="
+    disconnect_excluded_outputs "$virtual_fl" "$virtual_fr" "${input_app_names[@]}"
     
     echo ""
     echo "✓ Initial connections complete"
     echo ""
     echo "Monitoring for new audio ports... (Press Ctrl+C to stop)"
-    echo "  - Checking every 1 second"
-    echo "  - Will retry failed connections"
-    echo "  - Auto-excluding outputs that match input app names"
     echo ""
     
     local check_count=0
     
-    # Monitor loop - MORE FREQUENT AND PERSISTENT
     while true; do
         sleep 1
         check_count=$((check_count + 1))
         
-        # Refresh input app names list
+        # Refresh input app names
         input_app_names=()
+        local current_inputs=$(get_all_input_ports)
         while read -r port_spec; do
             [ -z "$port_spec" ] && continue
             local app_name=$(echo "$port_spec" | cut -d'|' -f3)
             input_app_names+=("$app_name")
-        done <<< "$(get_all_input_ports)"
+        done <<< "$current_inputs"
         
-        # Every 5 checks, re-verify all connections
+        # Every 2 seconds, check for excluded connections (more frequent)
+        if [ $((check_count % 2)) -eq 0 ]; then
+            disconnect_excluded_outputs "$virtual_fl" "$virtual_fr" "${input_app_names[@]}"
+        fi
+        
+        # Every 5 seconds, re-verify all connections
         if [ $((check_count % 5)) -eq 0 ]; then
-            # Re-check all known outputs
             for port_spec in "${!known_outputs[@]}"; do
-                local port_id=$(echo "$port_spec" | cut -d'|' -f1)
+                local port_alias=$(echo "$port_spec" | cut -d'|' -f2)
                 local app_name=$(echo "$port_spec" | cut -d'|' -f3)
                 
-                # Skip if now matches an input
                 if should_exclude_output "$app_name" "${input_app_names[@]}"; then
                     continue
                 fi
                 
-                if ! ports_connected "$port_id" "$virtual_fl" && \
-                   ! ports_connected "$port_id" "$virtual_fr"; then
-                    echo "[$(date '+%H:%M:%S')] Re-connecting output: $port_spec"
+                if ! ports_connected "$port_alias" "$virtual_fl" && \
+                   ! ports_connected "$port_alias" "$virtual_fr"; then
                     connect_output_to_virtual "$port_spec" "$virtual_fl" "$virtual_fr"
                 fi
             done
             
-            # Re-check all known inputs
             for port_spec in "${!known_inputs[@]}"; do
-                local port_id=$(echo "$port_spec" | cut -d'|' -f1)
-                if ! ports_connected "$monitor_fl" "$port_id" && \
-                   ! ports_connected "$monitor_fr" "$port_id"; then
-                    echo "[$(date '+%H:%M:%S')] Re-connecting input: $port_spec"
+                local port_alias=$(echo "$port_spec" | cut -d'|' -f2)
+                if ! ports_connected "$monitor_fl" "$port_alias" && \
+                   ! ports_connected "$monitor_fr" "$port_alias"; then
                     connect_virtual_to_input "$port_spec" "$monitor_fl" "$monitor_fr"
                 fi
             done
@@ -421,47 +528,46 @@ monitor_and_connect() {
                 local port_alias=$(echo "$port_spec" | cut -d'|' -f2)
                 local app_name=$(echo "$port_spec" | cut -d'|' -f3)
                 
-                # Check if this output should be excluded
+                known_outputs["$port_spec"]=1
+                
                 if should_exclude_output "$app_name" "${input_app_names[@]}"; then
-                    echo "[$(date '+%H:%M:%S')] ⊗ New output skipped: $port_alias (matches input app: $app_name)"
-                    known_outputs["$port_spec"]=1  # Mark as known but don't connect
+                    echo "[$(date '+%H:%M:%S')] ⊗ New output skipped: $port_alias (has input)"
                     continue
                 fi
                 
                 echo "[$(date '+%H:%M:%S')] New output detected: $port_alias"
-                known_outputs["$port_spec"]=1
-                output_timestamps["$port_spec"]=$(date +%s)
-                
-                # Try multiple times for new ports (they may not be ready)
                 for attempt in 1 2 3; do
-                    if connect_output_to_virtual "$port_spec" "$virtual_fl" "$virtual_fr"; then
-                        break
-                    fi
+                    connect_output_to_virtual "$port_spec" "$virtual_fl" "$virtual_fr" && break
                     [ $attempt -lt 3 ] && sleep 0.5
                 done
-                echo ""
             fi
         done <<< "$current_outputs"
         
         # Check for new inputs
-        local current_inputs=$(get_all_input_ports)
         while read -r port_spec; do
             [ -z "$port_spec" ] && continue
             
             if [ -z "${known_inputs[$port_spec]}" ]; then
                 local port_alias=$(echo "$port_spec" | cut -d'|' -f2)
-                echo "[$(date '+%H:%M:%S')] New input detected: $port_alias"
-                known_inputs["$port_spec"]=1
-                input_timestamps["$port_spec"]=$(date +%s)
+                local app_name=$(echo "$port_spec" | cut -d'|' -f3)
                 
-                # Try multiple times for new ports
+                echo "[$(date '+%H:%M:%S')] New input detected: $port_alias ($app_name)"
+                known_inputs["$port_spec"]=1
+                
+                # Immediately refresh and disconnect excluded outputs
+                input_app_names=()
+                while read -r inp; do
+                    [ -z "$inp" ] && continue
+                    input_app_names+=("$(echo "$inp" | cut -d'|' -f3)")
+                done <<< "$(get_all_input_ports)"
+                
+                echo "[$(date '+%H:%M:%S')] Disconnecting outputs from: $app_name"
+                disconnect_excluded_outputs "$virtual_fl" "$virtual_fr" "${input_app_names[@]}"
+                
                 for attempt in 1 2 3; do
-                    if connect_virtual_to_input "$port_spec" "$monitor_fl" "$monitor_fr"; then
-                        break
-                    fi
+                    connect_virtual_to_input "$port_spec" "$monitor_fl" "$monitor_fr" && break
                     [ $attempt -lt 3 ] && sleep 0.5
                 done
-                echo ""
             fi
         done <<< "$current_inputs"
     done
