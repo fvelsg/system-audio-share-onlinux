@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Audio Output-to-Input Connection GUI (Advanced)
+Audio Output-to-Input Connection GUI (Advanced + Mixer Guard)
 GTK interface for managing the virtual audio mixer with volume control
+ADDED: Mixer Volume Guard (Constant volume lock for the virtual sink)
 ADDED: Advanced Microphone Guard (Source selection, Custom Target Volume, Interval)
 """
 
@@ -21,12 +22,12 @@ GLib.set_application_name("Audio Sharing Control")
 
 class AudioMixerGUI(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Audio Mixer Manager (Advanced)")
+        super().__init__(title="Audio Mixer Manager (Pro)")
 
         self.set_icon_name("com.audioshare.AudioConnectionManager")
         
         # Increased height for new controls
-        self.set_default_size(650, 750)
+        self.set_default_size(650, 800)
         self.set_border_width(10)
         self.set_resizable(False)
         
@@ -41,6 +42,10 @@ class AudioMixerGUI(Gtk.Window):
         # Mic Guard State
         self.mic_guard_active = False
         self.mic_guard_timer = None
+
+        # Mixer Guard State (NEW)
+        self.mixer_guard_active = False
+        self.mixer_guard_timer = None
         
         # Main container
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -87,6 +92,7 @@ class AudioMixerGUI(Gtk.Window):
         volume_frame.add(volume_box)
         vbox.pack_start(volume_frame, False, False, 0)
         
+        # Manual Controls
         button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         button_box.set_homogeneous(True)
         
@@ -125,10 +131,35 @@ class AudioMixerGUI(Gtk.Window):
         apply_button.connect("clicked", self.on_update_step)
         step_box.pack_start(apply_button, False, False, 0)
         self.volume_status_label = Gtk.Label(label="Ready")
-        step_box.pack_start(self.volume_status_label, True, True, 0) # Fill rest
+        step_box.pack_start(self.volume_status_label, True, True, 0)
         volume_box.pack_start(step_box, False, False, 0)
+
+        # --- NEW: Mixer Guard (Lock Volume) ---
+        volume_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 5)
         
-        # --- Advanced Microphone Guard Frame (NEW) ---
+        lock_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        volume_box.pack_start(lock_box, False, False, 0)
+        
+        lock_label = Gtk.Label(label="<b>Lock Level:</b>")
+        lock_label.set_use_markup(True)
+        lock_box.pack_start(lock_label, False, False, 0)
+
+        self.mixer_lock_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 150, 1)
+        self.mixer_lock_scale.set_value(100)
+        self.mixer_lock_scale.set_hexpand(True)
+        self.mixer_lock_scale.add_mark(100, Gtk.PositionType.BOTTOM, "100%")
+        self.mixer_lock_scale.connect("value-changed", self.on_mixer_lock_slider_changed)
+        lock_box.pack_start(self.mixer_lock_scale, True, True, 0)
+        
+        self.mixer_lock_val_label = Gtk.Label(label="100%")
+        lock_box.pack_start(self.mixer_lock_val_label, False, False, 0)
+
+        self.mixer_guard_switch = Gtk.Switch()
+        self.mixer_guard_switch.connect("state-set", self.on_mixer_guard_toggled)
+        self.mixer_guard_switch.set_valign(Gtk.Align.CENTER)
+        lock_box.pack_start(self.mixer_guard_switch, False, False, 0)
+        
+        # --- Advanced Microphone Guard Frame ---
         mic_frame = Gtk.Frame(label="Advanced Microphone Guard")
         mic_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         mic_box.set_border_width(15)
@@ -260,6 +291,80 @@ class AudioMixerGUI(Gtk.Window):
         
         self.connect("destroy", self.on_window_destroy)
         self.log_message("Advanced Audio Manager ready.")
+
+    # ==========================================
+    # MIXER GUARD LOGIC (NEW)
+    # ==========================================
+    
+    def on_mixer_lock_slider_changed(self, scale):
+        val = int(scale.get_value())
+        self.mixer_lock_val_label.set_text(f"{val}%")
+        # If guard is already active, update immediately
+        if self.mixer_guard_active:
+            self.enforce_mixer_state()
+
+    def on_mixer_guard_toggled(self, switch, state):
+        self.mixer_guard_active = state
+        
+        if state:
+            if not self.mixer_exists:
+                self.log_message("Error: Mixer does not exist.")
+                switch.set_active(False)
+                return
+
+            self.log_message(f"MIXER LOCK ACTIVE: Holding at {int(self.mixer_lock_scale.get_value())}%")
+            self.volume_status_label.set_markup('<span foreground="blue"><b>LOCKED</b></span>')
+            
+            # Disable manual controls to prevent confusion
+            self.volume_up_button.set_sensitive(False)
+            self.volume_down_button.set_sensitive(False)
+            self.mute_button.set_sensitive(False)
+            
+            # Start timer (1.5 seconds)
+            if self.mixer_guard_timer:
+                GLib.source_remove(self.mixer_guard_timer)
+            self.mixer_guard_timer = GLib.timeout_add(1500, self.enforce_mixer_state)
+            
+            # Run once immediately
+            self.enforce_mixer_state()
+        else:
+            self.log_message("Mixer Lock Deactivated")
+            self.volume_status_label.set_markup('Ready')
+            
+            if self.mixer_guard_timer:
+                GLib.source_remove(self.mixer_guard_timer)
+                self.mixer_guard_timer = None
+            
+            # Re-enable controls
+            self.volume_up_button.set_sensitive(True)
+            self.volume_down_button.set_sensitive(True)
+            self.mute_button.set_sensitive(True)
+
+    def enforce_mixer_state(self):
+        """Timer callback to force mixer volume"""
+        if not self.mixer_guard_active or not self.mixer_exists:
+            return False # Stop timer if conditions met
+        
+        target_vol = int(self.mixer_lock_scale.get_value())
+        
+        try:
+            # Unmute first
+            subprocess.run(
+                ["pactl", "set-sink-mute", "AudioMixer_Virtual", "0"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            # Set Volume
+            subprocess.run(
+                ["pactl", "set-sink-volume", "AudioMixer_Virtual", f"{target_vol}%"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            # Update muted state variable just in case
+            self.is_muted = False 
+            self.mute_button.set_label("🔇 Mute Mixer")
+        except Exception as e:
+            print(f"Mixer Guard Error: {e}")
+            
+        return True # Continue timer
 
     # ==========================================
     # MIC GUARD LOGIC
@@ -399,9 +504,7 @@ class AudioMixerGUI(Gtk.Window):
             self.show_error_dialog("Main script not found!")
             return
         
-        # Stop guard before leaving
-        if self.mic_guard_timer:
-            GLib.source_remove(self.mic_guard_timer)
+        self.cleanup()
         
         try:
             subprocess.Popen(["python3", main_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -410,7 +513,6 @@ class AudioMixerGUI(Gtk.Window):
             self.show_error_dialog(f"Failed to launch main script: {e}")
     
     def close_window(self):
-        self.cleanup()
         self.destroy()
         Gtk.main_quit()
         return False
@@ -492,16 +594,25 @@ class AudioMixerGUI(Gtk.Window):
         self.is_muted = muted
         if muted:
             self.mute_button.set_label("🔊 Unmute Mixer")
-            self.volume_status_label.set_markup('<span foreground="orange">Muted</span>')
+            if not self.mixer_guard_active:
+                self.volume_status_label.set_markup('<span foreground="orange">Muted</span>')
         else:
             self.mute_button.set_label("🔇 Mute Mixer")
-            self.volume_status_label.set_markup('<span foreground="green">Ready</span>')
+            if not self.mixer_guard_active:
+                self.volume_status_label.set_markup('<span foreground="green">Ready</span>')
         self.mute_button.handler_unblock_by_func(self.on_toggle_mute)
     
     def set_volume_controls_sensitive(self, sensitive):
-        self.volume_up_button.set_sensitive(sensitive)
-        self.volume_down_button.set_sensitive(sensitive)
-        self.mute_button.set_sensitive(sensitive)
+        # We only respect this if the guard is OFF
+        if self.mixer_guard_active:
+            self.volume_up_button.set_sensitive(False)
+            self.volume_down_button.set_sensitive(False)
+            self.mute_button.set_sensitive(False)
+        else:
+            self.volume_up_button.set_sensitive(sensitive)
+            self.volume_down_button.set_sensitive(sensitive)
+            self.mute_button.set_sensitive(sensitive)
+            
         self.step_entry.set_sensitive(sensitive)
         self.graph_button.set_sensitive(sensitive)
     
@@ -563,12 +674,16 @@ class AudioMixerGUI(Gtk.Window):
             self.delete_button.set_sensitive(True)
             self.start_button.set_sensitive(not self.is_monitoring)
             self.set_volume_controls_sensitive(True)
+            self.mixer_guard_switch.set_sensitive(True)
+            self.mixer_lock_scale.set_sensitive(True)
         else:
             self.mixer_status_label.set_markup("🔴 <b>Virtual Mixer:</b> Not Created")
             self.create_button.set_sensitive(True)
             self.delete_button.set_sensitive(False)
             self.start_button.set_sensitive(False)
             self.set_volume_controls_sensitive(False)
+            self.mixer_guard_switch.set_sensitive(False)
+            self.mixer_lock_scale.set_sensitive(False)
         
         if self.is_monitoring:
             self.monitor_status_label.set_markup("🟢 <b>Auto-Connect:</b> Running")
@@ -663,6 +778,8 @@ class AudioMixerGUI(Gtk.Window):
     def cleanup(self):
         if self.mic_guard_timer:
             GLib.source_remove(self.mic_guard_timer)
+        if self.mixer_guard_timer:
+            GLib.source_remove(self.mixer_guard_timer)
         if self.monitor_process:
             try:
                 self.monitor_process.send_signal(signal.SIGINT)
