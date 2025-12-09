@@ -272,7 +272,7 @@ create_structure() {
 download_and_hash() {
     print_step "Step 4: Downloading Files from GitHub"
     
-    local scripts=("audioshare.sh" "advanced-mode.sh" "volume-control.sh" "graph.sh" "connect-outputs-to-inputs.sh" "outputs-to-inputs.py" "outputs-to-inputs-adv.py" "audio_monitor.py")
+    local scripts=("audioshare.py" "advanced-mode.sh" "volume-control.sh" "graph.sh" "connect-outputs-to-inputs.sh" "outputs-to-inputs.py" "outputs-to-inputs-adv.py" "audio_monitor.py")
     local temp_dir="$BUILD_DIR/temp"
     mkdir -p "$temp_dir"
     
@@ -298,7 +298,7 @@ download_and_hash() {
     rm -rf "$temp_dir"
     
     # Export hashes for manifest creation
-    export AUDIOSHARE_HASH="${file_hashes[audioshare.sh]}"
+    export AUDIOSHARE_HASH="${file_hashes[audioshare.py]}"
     export ADVANCED_HASH="${file_hashes[advanced-mode.sh]}"
     export VOLUME_HASH="${file_hashes[volume-control.sh]}"
     export GRAPH_HASH="${file_hashes[graph.sh]}"
@@ -519,7 +519,7 @@ modules:
     buildsystem: simple
     build-commands:
       # Install scripts
-      - install -Dm755 audioshare.sh /app/bin/audioshare.sh
+      - install -Dm755 audioshare.py /app/bin/audioshare.py
       - install -Dm755 advanced-mode.sh /app/bin/advanced-mode.sh
       - install -Dm755 volume-control.sh /app/bin/volume-control.sh
       - install -Dm755 graph.sh /app/bin/graph.sh
@@ -542,9 +542,9 @@ modules:
     sources:
       # Download scripts directly from GitHub
       - type: file
-        url: ${GITHUB_BASE_URL}/audioshare.sh
+        url: ${GITHUB_BASE_URL}/audioshare.py
         sha256: ${AUDIOSHARE_HASH}
-        dest-filename: audioshare.sh
+        dest-filename: audioshare.py
       
       - type: file
         url: ${GITHUB_BASE_URL}/advanced-mode.sh
