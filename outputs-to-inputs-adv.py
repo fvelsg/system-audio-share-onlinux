@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Audio Output-to-Input Connection GUI (Advanced + Mixer Guard)
-GTK interface for managing the virtual audio mixer with volume control
-ADDED: Mixer Volume Guard (Constant volume lock for the virtual sink)
-ADDED: Advanced Microphone Guard (Source selection, Custom Target Volume, Interval)
+Audio Connection Manager (Fixed Size + Clean Exit)
+- Default: Compact View
+- Behavior: Sticky, Always on Top, Fixed Size
+- Features: Instant terminal termination on close
 """
 
 import gi
@@ -13,25 +13,32 @@ import subprocess
 import threading
 import os
 import signal
-import re
 import sys
 
-# Set application ID to match desktop file
+# Allow Ctrl+C to kill the app from terminal immediately
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+# Set application ID
 GLib.set_prgname("com.audioshare.AudioConnectionManager")
 GLib.set_application_name("Audio Sharing Control")
 
-class AudioMixerGUI(Gtk.Window):
-    def __init__(self):
-        super().__init__(title="Audio Mixer Manager (Pro)")
-
+# ==========================================
+# BASE LOGIC CLASS
+# ==========================================
+class AudioMixerBase(Gtk.Window):
+    """
+    Base class containing shared logic, state management, 
+    and proper cleanup routines.
+    """
+    def __init__(self, title):
+        super().__init__(title=title)
         self.set_icon_name("com.audioshare.AudioConnectionManager")
         
-        # Increased height for new controls
-        self.set_default_size(650, 800)
-        self.set_border_width(10)
-        self.set_resizable(False)
+        # --- STICKY WINDOW SETTINGS ---
+        self.stick()
+        self.set_keep_above(True)
         
-        # State variables
+        # Shared State
         self.monitor_process = None
         self.is_monitoring = False
         self.mixer_exists = False
@@ -39,754 +46,624 @@ class AudioMixerGUI(Gtk.Window):
         self.is_muted = False
         self.graph_process = None
         
-        # Mic Guard State
+        # Guard State
         self.mic_guard_active = False
         self.mic_guard_timer = None
-
-        # Mixer Guard State (NEW)
         self.mixer_guard_active = False
         self.mixer_guard_timer = None
-        
-        # Main container
-        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        self.add(vbox)
-        
-        # --- Header ---
-        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        vbox.pack_start(header_box, False, False, 0)
-        
-        self.back_button = Gtk.Button(label="← Back")
-        self.back_button.set_tooltip_text("Return to Main Menu")
-        self.back_button.connect("clicked", self.on_back_clicked)
-        header_box.pack_start(self.back_button, False, False, 0)
-        
-        header_box.pack_start(Gtk.Label(), True, True, 0)
-        title_label = Gtk.Label()
-        title_label.set_markup("<big><b>Virtual Audio Mixer Manager</b></big>")
-        header_box.pack_start(title_label, False, False, 0)
-        header_box.pack_start(Gtk.Label(), True, True, 0)
-        
-        placeholder = Gtk.Label()
-        placeholder.set_size_request(70, -1)
-        header_box.pack_start(placeholder, False, False, 0)
-        
-        # --- Status Frame ---
-        status_frame = Gtk.Frame(label="Status")
-        status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        status_box.set_border_width(10)
-        status_frame.add(status_box)
-        vbox.pack_start(status_frame, False, False, 0)
-        
-        self.mixer_status_label = Gtk.Label()
-        self.mixer_status_label.set_halign(Gtk.Align.START)
-        status_box.pack_start(self.mixer_status_label, False, False, 0)
-        
-        self.monitor_status_label = Gtk.Label()
-        self.monitor_status_label.set_halign(Gtk.Align.START)
-        status_box.pack_start(self.monitor_status_label, False, False, 0)
-        
-        # --- Mixer Volume Control ---
-        volume_frame = Gtk.Frame(label="Virtual Mixer Volume")
-        volume_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        volume_box.set_border_width(15)
-        volume_frame.add(volume_box)
-        vbox.pack_start(volume_frame, False, False, 0)
-        
-        # Manual Controls
-        button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        button_box.set_homogeneous(True)
-        
-        self.volume_up_button = Gtk.Button(label="🔊 Volume Up")
-        self.volume_up_button.connect("clicked", self.on_volume_up)
-        button_box.pack_start(self.volume_up_button, True, True, 0)
-        
-        self.volume_down_button = Gtk.Button(label="🔉 Volume Down")
-        self.volume_down_button.connect("clicked", self.on_volume_down)
-        button_box.pack_start(self.volume_down_button, True, True, 0)
-        
-        volume_box.pack_start(button_box, False, False, 0)
-        
-        mute_graph_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        mute_graph_box.set_homogeneous(True)
-        
-        self.mute_button = Gtk.Button(label="🔇 Mute Mixer")
-        self.mute_button.connect("clicked", self.on_toggle_mute)
-        mute_graph_box.pack_start(self.mute_button, True, True, 0)
-        
-        self.graph_button = Gtk.Button(label="📊 Waveform Monitor")
-        self.graph_button.connect("clicked", self.on_open_graph)
-        mute_graph_box.pack_start(self.graph_button, True, True, 0)
-        
-        volume_box.pack_start(mute_graph_box, False, False, 0)
-        
-        # Mixer Step config
-        step_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        step_label = Gtk.Label(label="Step (%):")
-        step_box.pack_start(step_label, False, False, 0)
-        self.step_entry = Gtk.Entry()
-        self.step_entry.set_text(str(self.step_percentage))
-        self.step_entry.set_width_chars(5)
-        step_box.pack_start(self.step_entry, False, False, 0)
-        apply_button = Gtk.Button(label="Apply")
-        apply_button.connect("clicked", self.on_update_step)
-        step_box.pack_start(apply_button, False, False, 0)
-        self.volume_status_label = Gtk.Label(label="Ready")
-        step_box.pack_start(self.volume_status_label, True, True, 0)
-        volume_box.pack_start(step_box, False, False, 0)
 
-        # --- NEW: Mixer Guard (Lock Volume) ---
-        volume_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 5)
-        
-        lock_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        volume_box.pack_start(lock_box, False, False, 0)
-        
-        lock_label = Gtk.Label(label="<b>Lock Level:</b>")
-        lock_label.set_use_markup(True)
-        lock_box.pack_start(lock_label, False, False, 0)
+        self.switching_mode = False 
+        self.script_dir = os.path.dirname(os.path.abspath(__file__))
 
-        self.mixer_lock_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 150, 1)
-        self.mixer_lock_scale.set_value(100)
-        self.mixer_lock_scale.set_hexpand(True)
-        self.mixer_lock_scale.add_mark(100, Gtk.PositionType.BOTTOM, "100%")
-        self.mixer_lock_scale.connect("value-changed", self.on_mixer_lock_slider_changed)
-        lock_box.pack_start(self.mixer_lock_scale, True, True, 0)
-        
-        self.mixer_lock_val_label = Gtk.Label(label="100%")
-        lock_box.pack_start(self.mixer_lock_val_label, False, False, 0)
+    def get_script_path(self, script_name):
+        p = os.path.join(self.script_dir, script_name)
+        return p if os.path.exists(p) else None
 
-        self.mixer_guard_switch = Gtk.Switch()
-        self.mixer_guard_switch.connect("state-set", self.on_mixer_guard_toggled)
-        self.mixer_guard_switch.set_valign(Gtk.Align.CENTER)
-        lock_box.pack_start(self.mixer_guard_switch, False, False, 0)
-        
-        # --- Advanced Microphone Guard Frame ---
-        mic_frame = Gtk.Frame(label="Advanced Microphone Guard")
-        mic_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        mic_box.set_border_width(15)
-        mic_frame.add(mic_box)
-        vbox.pack_start(mic_frame, False, False, 0)
-        
-        # Row 1: Source Selection
-        mic_sel_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        mic_box.pack_start(mic_sel_box, False, False, 0)
-        
-        mic_label = Gtk.Label(label="Target Mic:")
-        mic_sel_box.pack_start(mic_label, False, False, 0)
-        
-        self.mic_combo = Gtk.ComboBoxText()
-        self.mic_combo.set_hexpand(True)
-        mic_sel_box.pack_start(self.mic_combo, True, True, 0)
-        
-        mic_refresh_btn = Gtk.Button(label="🔄")
-        mic_refresh_btn.set_tooltip_text("Refresh Device List")
-        mic_refresh_btn.connect("clicked", self.on_refresh_mics)
-        mic_sel_box.pack_start(mic_refresh_btn, False, False, 0)
-        
-        # Row 2: Target Volume Slider
-        mic_vol_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        mic_box.pack_start(mic_vol_box, False, False, 0)
-        
-        vol_label = Gtk.Label(label="Lock Volume:")
-        mic_vol_box.pack_start(vol_label, False, False, 0)
-        
-        self.mic_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 150, 1)
-        self.mic_scale.set_value(100)
-        self.mic_scale.set_hexpand(True)
-        self.mic_scale.add_mark(100, Gtk.PositionType.BOTTOM, "100%")
-        self.mic_scale.add_mark(0, Gtk.PositionType.BOTTOM, "Mute")
-        mic_vol_box.pack_start(self.mic_scale, True, True, 0)
-        
-        self.mic_vol_value_label = Gtk.Label(label="100%")
-        self.mic_scale.connect("value-changed", self.on_mic_slider_changed)
-        mic_vol_box.pack_start(self.mic_vol_value_label, False, False, 0)
-        
-        # Row 3: Interval and Activation
-        mic_ctrl_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
-        mic_box.pack_start(mic_ctrl_box, False, False, 0)
-        
-        # Interval Spinner
-        int_label = Gtk.Label(label="Check Interval (sec):")
-        mic_ctrl_box.pack_start(int_label, False, False, 0)
-        
-        adj = Gtk.Adjustment(value=2, lower=1, upper=60, step_increment=1, page_increment=5)
-        self.mic_interval_spin = Gtk.SpinButton(adjustment=adj)
-        mic_ctrl_box.pack_start(self.mic_interval_spin, False, False, 0)
-        
-        # Activation Switch
-        self.mic_switch = Gtk.Switch()
-        self.mic_switch.connect("state-set", self.on_mic_guard_toggled)
-        self.mic_switch.set_valign(Gtk.Align.CENTER)
-        
-        switch_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        switch_box.pack_end(self.mic_switch, False, False, 0)
-        switch_box.pack_end(Gtk.Label(label="<b>Enable Guard:</b>", use_markup=True), False, False, 0)
-        mic_ctrl_box.pack_end(switch_box, False, False, 0)
-        
-        self.mic_status_label = Gtk.Label(label="<i>Inactive</i>")
-        self.mic_status_label.set_use_markup(True)
-        self.mic_status_label.set_halign(Gtk.Align.END)
-        mic_box.pack_start(self.mic_status_label, False, False, 0)
-
-        # --- Main Controls ---
-        control_frame = Gtk.Frame(label="Mixer Controls")
-        control_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        control_box.set_border_width(10)
-        control_frame.add(control_box)
-        vbox.pack_start(control_frame, False, False, 0)
-        
-        self.create_button = Gtk.Button(label="Create Virtual Mixer")
-        self.create_button.connect("clicked", self.on_create_clicked)
-        control_box.pack_start(self.create_button, False, False, 0)
-        
-        monitor_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        control_box.pack_start(monitor_hbox, False, False, 0)
-        
-        self.start_button = Gtk.Button(label="Start Auto-Connect")
-        self.start_button.connect("clicked", self.on_start_clicked)
-        monitor_hbox.pack_start(self.start_button, True, True, 0)
-        
-        self.stop_button = Gtk.Button(label="Stop Monitor")
-        self.stop_button.connect("clicked", self.on_stop_clicked)
-        self.stop_button.set_sensitive(False)
-        monitor_hbox.pack_start(self.stop_button, True, True, 0)
-        
-        self.delete_button = Gtk.Button(label="Delete Virtual Mixer")
-        self.delete_button.connect("clicked", self.on_delete_clicked)
-        control_box.pack_start(self.delete_button, False, False, 0)
-        
-        # --- Log ---
-        log_frame = Gtk.Frame(label="Activity Log")
-        vbox.pack_start(log_frame, True, True, 0)
-        
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        log_frame.add(scrolled)
-        
-        self.log_view = Gtk.TextView()
-        self.log_view.set_editable(False)
-        self.log_view.set_wrap_mode(Gtk.WrapMode.WORD)
-        self.log_buffer = self.log_view.get_buffer()
-        scrolled.add(self.log_view)
-        
-        # --- Footer ---
-        bottom_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        vbox.pack_start(bottom_box, False, False, 0)
-        
-        clear_button = Gtk.Button(label="Clear Log")
-        clear_button.connect("clicked", self.on_clear_log)
-        bottom_box.pack_start(clear_button, False, False, 0)
-        
-        quit_button = Gtk.Button(label="Quit")
-        quit_button.connect("clicked", self.on_quit_clicked)
-        bottom_box.pack_end(quit_button, False, False, 0)
-        
-        # Initialization
-        self.set_volume_controls_sensitive(False)
-        self.check_mixer_status()
-        self.update_status_display()
-        self.load_microphone_sources()
-        
-        if self.mixer_exists:
-            self.update_mute_state_from_system()
-        
-        self.connect("destroy", self.on_window_destroy)
-        self.log_message("Advanced Audio Manager ready.")
-
-    # ==========================================
-    # MIXER GUARD LOGIC (NEW)
-    # ==========================================
-    
-    def on_mixer_lock_slider_changed(self, scale):
-        val = int(scale.get_value())
-        self.mixer_lock_val_label.set_text(f"{val}%")
-        # If guard is already active, update immediately
-        if self.mixer_guard_active:
-            self.enforce_mixer_state()
-
-    def on_mixer_guard_toggled(self, switch, state):
-        self.mixer_guard_active = state
-        
-        if state:
-            if not self.mixer_exists:
-                self.log_message("Error: Mixer does not exist.")
-                switch.set_active(False)
-                return
-
-            self.log_message(f"MIXER LOCK ACTIVE: Holding at {int(self.mixer_lock_scale.get_value())}%")
-            self.volume_status_label.set_markup('<span foreground="blue"><b>LOCKED</b></span>')
-            
-            # Disable manual controls to prevent confusion
-            self.volume_up_button.set_sensitive(False)
-            self.volume_down_button.set_sensitive(False)
-            self.mute_button.set_sensitive(False)
-            
-            # Start timer (1.5 seconds)
-            if self.mixer_guard_timer:
-                GLib.source_remove(self.mixer_guard_timer)
-            self.mixer_guard_timer = GLib.timeout_add(1500, self.enforce_mixer_state)
-            
-            # Run once immediately
-            self.enforce_mixer_state()
-        else:
-            self.log_message("Mixer Lock Deactivated")
-            self.volume_status_label.set_markup('Ready')
-            
-            if self.mixer_guard_timer:
-                GLib.source_remove(self.mixer_guard_timer)
-                self.mixer_guard_timer = None
-            
-            # Re-enable controls
-            self.volume_up_button.set_sensitive(True)
-            self.volume_down_button.set_sensitive(True)
-            self.mute_button.set_sensitive(True)
-
-    def enforce_mixer_state(self):
-        """Timer callback to force mixer volume"""
-        if not self.mixer_guard_active or not self.mixer_exists:
-            return False # Stop timer if conditions met
-        
-        target_vol = int(self.mixer_lock_scale.get_value())
-        
-        try:
-            # Unmute first
-            subprocess.run(
-                ["pactl", "set-sink-mute", "AudioMixer_Virtual", "0"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            # Set Volume
-            subprocess.run(
-                ["pactl", "set-sink-volume", "AudioMixer_Virtual", f"{target_vol}%"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            # Update muted state variable just in case
-            self.is_muted = False 
-            self.mute_button.set_label("🔇 Mute Mixer")
-        except Exception as e:
-            print(f"Mixer Guard Error: {e}")
-            
-        return True # Continue timer
-
-    # ==========================================
-    # MIC GUARD LOGIC
-    # ==========================================
-
-    def load_microphone_sources(self):
-        """Populate combobox with input sources (excluding monitors)"""
-        self.mic_combo.remove_all()
-        try:
-            # Use 'pactl list sources short' to get ID and Name
-            result = subprocess.run(['pactl', 'list', 'sources', 'short'], 
-                                  capture_output=True, text=True)
-            
-            # Default option
-            self.mic_combo.append("@DEFAULT_SOURCE@", "System Default Microphone")
-            
-            for line in result.stdout.strip().split('\n'):
-                if not line: continue
-                parts = line.split('\t')
-                if len(parts) >= 2:
-                    name = parts[1]
-                    # Filter out monitor sources (usually output monitors)
-                    if not name.endswith(".monitor"):
-                        # Try to get a nicer description via pactl list sources
-                        desc = self.get_source_description(name)
-                        display_text = f"{desc} ({name})" if desc != name else name
-                        self.mic_combo.append(name, display_text)
-            
-            self.mic_combo.set_active_id("@DEFAULT_SOURCE@")
-            
-        except Exception as e:
-            self.log_message(f"Error loading mics: {e}")
-            self.mic_combo.append("@DEFAULT_SOURCE@", "Default (Error loading list)")
-            self.mic_combo.set_active(0)
-
-    def get_source_description(self, source_name):
-        """Helper to find description for a specific source"""
-        try:
-            # This is expensive, so we only do it on refresh
-            res = subprocess.run(['pactl', 'list', 'sources'], capture_output=True, text=True)
-            current_name = None
-            for line in res.stdout.split('\n'):
-                line = line.strip()
-                if line.startswith("Name:"):
-                    current_name = line.split(":", 1)[1].strip()
-                elif line.startswith("Description:") and current_name == source_name:
-                    return line.split(":", 1)[1].strip()
-            return source_name
-        except:
-            return source_name
-
-    def on_refresh_mics(self, button):
-        self.load_microphone_sources()
-        self.log_message("Refreshed microphone list")
-
-    def on_mic_slider_changed(self, scale):
-        val = int(scale.get_value())
-        self.mic_vol_value_label.set_text(f"{val}%")
-
-    def on_mic_guard_toggled(self, switch, state):
-        self.mic_guard_active = state
-        
-        if state:
-            # Validate selection
-            target_mic = self.mic_combo.get_active_id()
-            if not target_mic:
-                self.log_message("Error: No microphone selected")
-                switch.set_active(False)
-                return False
-
-            interval = int(self.mic_interval_spin.get_value()) * 1000
-            target_vol = int(self.mic_scale.get_value())
-            
-            self.log_message(f"GUARD ACTIVE: Locking {target_mic} to {target_vol}% every {interval/1000}s")
-            self.mic_status_label.set_markup(f'<span foreground="green"><b>GUARD ACTIVE</b> ({target_vol}%)</span>')
-            
-            # Disable controls while active to prevent confusion
-            self.mic_combo.set_sensitive(False)
-            self.mic_interval_spin.set_sensitive(False)
-            
-            # Start timer
-            if self.mic_guard_timer:
-                GLib.source_remove(self.mic_guard_timer)
-            self.mic_guard_timer = GLib.timeout_add(interval, self.enforce_mic_state)
-            
-            # Run once immediately
-            self.enforce_mic_state()
-        else:
-            self.log_message("Mic Guard Deactivated")
-            self.mic_status_label.set_markup('<i>Inactive</i>')
-            
-            if self.mic_guard_timer:
-                GLib.source_remove(self.mic_guard_timer)
-                self.mic_guard_timer = None
-            
-            # Re-enable controls
-            self.mic_combo.set_sensitive(True)
-            self.mic_interval_spin.set_sensitive(True)
-
-    def enforce_mic_state(self):
-        """The timer callback to force volume"""
-        if not self.mic_guard_active:
-            return False # Stop timer
-        
-        target_mic = self.mic_combo.get_active_id()
-        target_vol = int(self.mic_scale.get_value())
-        
-        try:
-            # Unmute
-            subprocess.run(
-                ["pactl", "set-source-mute", target_mic, "0"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            # Set Volume
-            subprocess.run(
-                ["pactl", "set-source-volume", target_mic, f"{target_vol}%"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-        except Exception as e:
-            print(f"Guard Error: {e}")
-            
-        return True # Continue timer
-
-    # ==========================================
-    # STANDARD MIXER LOGIC (Legacy functionality)
-    # ==========================================
-
-    def get_main_script_path(self):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        main_script = os.path.join(script_dir, "outputs-to-inputs.py")
-        if not os.path.exists(main_script): return None
-        return main_script
-    
-    def on_back_clicked(self, button):
-        main_script = self.get_main_script_path()
-        if not main_script:
-            self.show_error_dialog("Main script not found!")
-            return
-        
-        self.cleanup()
-        
-        try:
-            subprocess.Popen(["python3", main_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            GLib.timeout_add(100, self.close_window)
-        except Exception as e:
-            self.show_error_dialog(f"Failed to launch main script: {e}")
-    
-    def close_window(self):
-        self.destroy()
-        Gtk.main_quit()
-        return False
-    
-    def get_script_path(self):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(script_dir, "connect-outputs-to-inputs.sh")
-        if not os.path.exists(script_path): return None
-        return script_path
-    
-    def get_graph_script_path(self):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(script_dir, "graph.sh")
-        if not os.path.exists(script_path): return None
-        return script_path
-    
-    def on_open_graph(self, button):
-        if self.graph_process and self.graph_process.poll() is None:
-            self.log_message("Waveform monitor is already open")
-            return
-        
-        graph_path = self.get_graph_script_path()
-        if not graph_path:
-            self.show_error_dialog("graph.sh not found")
-            return
-        
-        # Check if mixer exists
-        if not self.mixer_exists:
-            self.show_mixer_warning_dialog(graph_path)
-            return
-        
-        try:
-            self.log_message("Opening waveform monitor...")
-            self.graph_process = subprocess.Popen(
-                ["python3", graph_path, "--device", "AudioMixer_Virtual.monitor"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-        except Exception as e:
-            self.show_error_dialog(f"Failed: {e}")
-    
-    def show_mixer_warning_dialog(self, graph_path):
-        dialog = Gtk.MessageDialog(
-            transient_for=self, flags=0, message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.NONE, text="Audio Mixer Not Created"
-        )
-        dialog.format_secondary_text("Open monitor without the virtual mixer device?")
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Open Default", Gtk.ResponseType.YES)
-        response = dialog.run()
-        dialog.destroy()
-        
-        if response == Gtk.ResponseType.YES:
-            subprocess.Popen(["python3", graph_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    def check_mixer_status(self):
-        try:
-            result = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=5)
-            self.mixer_exists = "AudioMixer_Virtual" in result.stdout
-        except:
-            self.mixer_exists = False
-    
-    def get_mute_state(self):
-        try:
-            result = subprocess.run(["pactl", "list", "sinks"], capture_output=True, text=True, timeout=5)
-            lines = result.stdout.split('\n')
-            in_mixer_sink = False
-            for line in lines:
-                if "AudioMixer_Virtual" in line: in_mixer_sink = True
-                elif in_mixer_sink and "Mute:" in line: return "yes" in line.lower()
-                elif in_mixer_sink and ("Sink #" in line or "Source #" in line): break
-            return False
-        except:
-            return False
-    
-    def update_mute_state_from_system(self):
-        if not self.mixer_exists: return
-        muted = self.get_mute_state()
-        self.mute_button.handler_block_by_func(self.on_toggle_mute)
-        self.is_muted = muted
-        if muted:
-            self.mute_button.set_label("🔊 Unmute Mixer")
-            if not self.mixer_guard_active:
-                self.volume_status_label.set_markup('<span foreground="orange">Muted</span>')
-        else:
-            self.mute_button.set_label("🔇 Mute Mixer")
-            if not self.mixer_guard_active:
-                self.volume_status_label.set_markup('<span foreground="green">Ready</span>')
-        self.mute_button.handler_unblock_by_func(self.on_toggle_mute)
-    
-    def set_volume_controls_sensitive(self, sensitive):
-        # We only respect this if the guard is OFF
-        if self.mixer_guard_active:
-            self.volume_up_button.set_sensitive(False)
-            self.volume_down_button.set_sensitive(False)
-            self.mute_button.set_sensitive(False)
-        else:
-            self.volume_up_button.set_sensitive(sensitive)
-            self.volume_down_button.set_sensitive(sensitive)
-            self.mute_button.set_sensitive(sensitive)
-            
-        self.step_entry.set_sensitive(sensitive)
-        self.graph_button.set_sensitive(sensitive)
-    
-    def on_volume_up(self, button):
-        if not self.mixer_exists: return
-        try:
-            subprocess.run(["pactl", "set-sink-volume", "AudioMixer_Virtual", f"+{self.step_percentage}%"], check=True)
-            self.log_message(f"Mixer Vol +{self.step_percentage}%")
-            if self.is_muted:
-                self.is_muted = False
-                self.mute_button.set_label("🔇 Mute Mixer")
-        except Exception as e:
-            self.log_message(f"Error: {e}")
-    
-    def on_volume_down(self, button):
-        if not self.mixer_exists: return
-        try:
-            subprocess.run(["pactl", "set-sink-volume", "AudioMixer_Virtual", f"-{self.step_percentage}%"], check=True)
-            self.log_message(f"Mixer Vol -{self.step_percentage}%")
-        except Exception as e:
-            self.log_message(f"Error: {e}")
-    
-    def on_toggle_mute(self, button):
-        if not self.mixer_exists: return
-        try:
-            mute_val = '0' if self.is_muted else '1'
-            subprocess.run(["pactl", "set-sink-mute", "AudioMixer_Virtual", mute_val], check=True)
-            self.is_muted = not self.is_muted
-            if self.is_muted:
-                self.mute_button.set_label("🔊 Unmute Mixer")
-                self.log_message("Mixer Muted")
-            else:
-                self.mute_button.set_label("🔇 Mute Mixer")
-                self.log_message("Mixer Unmuted")
-        except Exception as e:
-            self.log_message(f"Error: {e}")
-    
-    def on_update_step(self, button):
-        try:
-            new = int(self.step_entry.get_text())
-            if 1 <= new <= 100:
-                self.step_percentage = new
-                self.log_message(f"Step updated: {new}%")
-            else:
-                raise ValueError
-        except:
-            self.step_entry.set_text(str(self.step_percentage))
-    
-    def show_error_dialog(self, message):
-        dialog = Gtk.MessageDialog(transient_for=self, flags=0, message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.OK, text="Error")
-        dialog.format_secondary_text(message)
-        dialog.run()
-        dialog.destroy()
-    
-    def update_status_display(self):
-        if self.mixer_exists:
-            self.mixer_status_label.set_markup("🟢 <b>Virtual Mixer:</b> Active")
-            self.create_button.set_sensitive(False)
-            self.delete_button.set_sensitive(True)
-            self.start_button.set_sensitive(not self.is_monitoring)
-            self.set_volume_controls_sensitive(True)
-            self.mixer_guard_switch.set_sensitive(True)
-            self.mixer_lock_scale.set_sensitive(True)
-        else:
-            self.mixer_status_label.set_markup("🔴 <b>Virtual Mixer:</b> Not Created")
-            self.create_button.set_sensitive(True)
-            self.delete_button.set_sensitive(False)
-            self.start_button.set_sensitive(False)
-            self.set_volume_controls_sensitive(False)
-            self.mixer_guard_switch.set_sensitive(False)
-            self.mixer_lock_scale.set_sensitive(False)
+    # --- STATE TRANSFER ---
+    def transfer_state_from(self, old_window):
+        self.is_monitoring = old_window.is_monitoring
+        self.mixer_exists = old_window.mixer_exists
+        self.step_percentage = old_window.step_percentage
+        self.is_muted = old_window.is_muted
+        self.mic_guard_active = old_window.mic_guard_active
+        self.mixer_guard_active = old_window.mixer_guard_active
         
         if self.is_monitoring:
-            self.monitor_status_label.set_markup("🟢 <b>Auto-Connect:</b> Running")
-            self.start_button.set_sensitive(False)
-            self.stop_button.set_sensitive(True)
-        else:
-            self.monitor_status_label.set_markup("⚪ <b>Auto-Connect:</b> Stopped")
-            self.start_button.set_sensitive(self.mixer_exists)
-            self.stop_button.set_sensitive(False)
-    
-    def log_message(self, message):
-        end = self.log_buffer.get_end_iter()
-        self.log_buffer.insert(end, message + "\n")
-        mark = self.log_buffer.create_mark(None, end, False)
-        self.log_view.scroll_mark_onscreen(mark)
-    
-    def run_command(self, command, success_msg, error_msg):
-        script_path = self.get_script_path()
-        if not script_path: return False
+            threading.Thread(target=self.monitor_thread, daemon=True).start()
+            
+        if self.mixer_guard_active:
+            GLib.idle_add(self.restore_mixer_guard)
+
+        if self.mic_guard_active:
+             GLib.idle_add(self.restore_mic_guard)
+
+    def restore_mixer_guard(self):
+        self.mixer_guard_switch.set_active(True)
+        self.on_mixer_guard_toggled(self.mixer_guard_switch, True)
+
+    def restore_mic_guard(self):
+        self.mic_switch.set_active(True)
+        self.on_mic_guard_toggled(self.mic_switch, True)
+
+    # --- CLEANUP & EXIT ---
+    def on_window_destroy(self, widget):
+        """
+        Triggered when the window is closed (X button).
+        Forces the application and terminal process to end.
+        """
+        self.cleanup()
+        
+        if self.switching_mode:
+            return # Don't exit if we are just switching views
+            
+        Gtk.main_quit()
+        sys.exit(0) # <--- CRITICAL: Forces terminal process to close immediately
+
+    def cleanup(self):
+        if self.mic_guard_timer:
+            GLib.source_remove(self.mic_guard_timer)
+            self.mic_guard_timer = None
+        if self.mixer_guard_timer:
+            GLib.source_remove(self.mixer_guard_timer)
+            self.mixer_guard_timer = None
+            
+        if self.monitor_process:
+            try:
+                self.monitor_process.send_signal(signal.SIGINT)
+                self.monitor_process.wait(timeout=0.5)
+            except:
+                try: self.monitor_process.kill()
+                except: pass
+            self.monitor_process = None
+            
+        if self.graph_process:
+            try: self.graph_process.terminate()
+            except: pass
+            self.graph_process = None
+
+    def switch_window(self, TargetClass):
+        self.switching_mode = True
+        new_win = TargetClass(state_source=self)
+        new_win.show_all()
+        self.destroy()
+
+    # --- LOGIC ---
+    def run_command(self, cmd, success_msg=None, error_msg=None):
+        s = self.get_script_path("connect-outputs-to-inputs.sh")
+        if not s: return False
         try:
-            self.log_message(f"Cmd: {command}")
-            res = subprocess.run(["bash", script_path, command], capture_output=True, text=True, timeout=10)
-            if res.returncode == 0:
-                self.log_message(success_msg)
+            if subprocess.run(["bash", s, cmd]).returncode == 0:
+                if success_msg: self.log_message(success_msg)
                 return True
             else:
-                self.log_message(error_msg)
+                if error_msg: self.log_message(error_msg)
                 return False
         except Exception as e:
             self.log_message(f"Error: {e}")
             return False
-    
-    def on_create_clicked(self, button):
+
+    def monitor_thread(self):
+        s = self.get_script_path("connect-outputs-to-inputs.sh")
+        try:
+            self.log_message("Starting Monitor...")
+            self.monitor_process = subprocess.Popen(["bash", s, "monitor"], stdout=subprocess.PIPE, text=True, bufsize=1)
+            for line in self.monitor_process.stdout:
+                if line.strip(): GLib.idle_add(self.log_message, line.strip())
+        except Exception as e:
+            GLib.idle_add(self.log_message, f"Error: {e}")
+        finally:
+            self.monitor_process = None
+            if not self.switching_mode:
+                self.is_monitoring = False
+                GLib.idle_add(self.update_status_display)
+
+    def on_create_clicked(self, b):
         if self.run_command("create", "Mixer Created", "Failed"):
             self.mixer_exists = True
             self.update_status_display()
-            GLib.timeout_add(500, self.update_mute_state_from_system)
-    
-    def monitor_thread(self):
-        script_path = self.get_script_path()
-        if not script_path: return
-        try:
-            GLib.idle_add(self.log_message, "Starting Monitor...")
-            self.monitor_process = subprocess.Popen(["bash", script_path, "monitor"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-            for line in self.monitor_process.stdout:
-                if line.strip(): GLib.idle_add(self.log_message, line.rstrip())
-            self.monitor_process.wait()
-        except Exception as e:
-            GLib.idle_add(self.log_message, f"Monitor Error: {e}")
-        finally:
-            self.monitor_process = None
-            self.is_monitoring = False
-            GLib.idle_add(self.update_status_display)
-    
-    def on_start_clicked(self, button):
-        if not self.mixer_exists:
-            self.log_message("Create mixer first!")
-            return
-        self.is_monitoring = True
-        self.update_status_display()
-        threading.Thread(target=self.monitor_thread, daemon=True).start()
-    
-    def on_stop_clicked(self, button):
-        if self.monitor_process:
-            self.log_message("Stopping monitor...")
-            try:
-                self.monitor_process.send_signal(signal.SIGINT)
-            except:
-                pass
-        self.is_monitoring = False
-        self.update_status_display()
-    
-    def on_delete_clicked(self, button):
+            self.update_mute_ui()
+
+    def on_delete_clicked(self, b):
         if self.is_monitoring:
             self.log_message("Stop monitor first!")
             return
         if self.run_command("delete", "Mixer Deleted", "Failed"):
             self.mixer_exists = False
             self.update_status_display()
-    
-    def on_clear_log(self, button):
-        self.log_buffer.set_text("")
-    
-    def on_quit_clicked(self, button):
-        self.cleanup()
-        Gtk.main_quit()
-    
-    def on_window_destroy(self, widget):
-        self.cleanup()
-        Gtk.main_quit()
-    
-    def cleanup(self):
-        if self.mic_guard_timer:
-            GLib.source_remove(self.mic_guard_timer)
-        if self.mixer_guard_timer:
-            GLib.source_remove(self.mixer_guard_timer)
+
+    def on_start_clicked(self, b):
+        self.is_monitoring = True
+        self.update_status_display()
+        threading.Thread(target=self.monitor_thread, daemon=True).start()
+
+    def on_stop_clicked(self, b):
         if self.monitor_process:
-            try:
-                self.monitor_process.send_signal(signal.SIGINT)
-                self.monitor_process.wait(timeout=2)
-            except:
-                try: self.monitor_process.kill()
-                except: pass
+            self.monitor_process.send_signal(signal.SIGINT)
+        self.is_monitoring = False
+        self.update_status_display()
+
+    def on_open_graph(self, b):
+        graph_script = self.get_script_path("graph.sh")
+        if not graph_script:
+            self.log_message("Error: graph.sh not found")
+            return
+        if not self.mixer_exists:
+            dialog = Gtk.MessageDialog(transient_for=self, flags=0, message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE, text="Mixer Not Found")
+            dialog.format_secondary_text("Open graph anyway? (Manual device selection required)")
+            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            dialog.add_button("Open", Gtk.ResponseType.YES)
+            if dialog.run() != Gtk.ResponseType.YES:
+                dialog.destroy(); return
+            dialog.destroy()
+            self.graph_process = subprocess.Popen(["python3", graph_script], stdout=subprocess.DEVNULL)
+        else:
+            self.graph_process = subprocess.Popen(["python3", graph_script, "--device", "AudioMixer_Virtual.monitor"], stdout=subprocess.DEVNULL)
+
+    def on_back_clicked(self, b):
+        main = self.get_script_path("outputs-to-inputs.py")
+        self.cleanup()
+        if main: subprocess.Popen(["python3", main], stdout=subprocess.DEVNULL)
+        Gtk.main_quit()
+        sys.exit(0)
+
+    def on_volume_up(self, b):
+        if self.mixer_exists: subprocess.run(["pactl", "set-sink-volume", "AudioMixer_Virtual", f"+{self.step_percentage}%"])
+    def on_volume_down(self, b):
+        if self.mixer_exists: subprocess.run(["pactl", "set-sink-volume", "AudioMixer_Virtual", f"-{self.step_percentage}%"])
+    def on_toggle_mute(self, b):
+        if not self.mixer_exists: return
+        self.is_muted = not self.is_muted
+        val = '1' if self.is_muted else '0'
+        subprocess.run(["pactl", "set-sink-mute", "AudioMixer_Virtual", val])
+        self.update_mute_ui()
+    def on_update_step(self, entry):
+        try: self.step_percentage = int(entry.get_text())
+        except: pass
+
+    def load_microphone_sources(self, combo):
+        combo.remove_all()
+        try:
+            r = subprocess.run(['pactl', 'list', 'sources', 'short'], capture_output=True, text=True)
+            combo.append("@DEFAULT_SOURCE@", "Default Mic")
+            for line in r.stdout.strip().split('\n'):
+                parts = line.split('\t')
+                if len(parts) >= 2 and not parts[1].endswith(".monitor"):
+                    combo.append(parts[1], parts[1])
+            combo.set_active_id("@DEFAULT_SOURCE@")
+        except:
+            combo.append("0", "Error")
+            combo.set_active(0)
+
+    def on_mixer_guard_toggled(self, sw, state):
+        self.mixer_guard_active = state
+        if state:
+            self.mixer_guard_timer = GLib.timeout_add(1500, self.enforce_mixer_state)
+            self.enforce_mixer_state()
+            self.set_volume_controls_sensitive(False)
+            self.log_message("Mixer Guard ON")
+        else:
+            if self.mixer_guard_timer: GLib.source_remove(self.mixer_guard_timer)
+            self.set_volume_controls_sensitive(True)
+            self.log_message("Mixer Guard OFF")
+
+    def enforce_mixer_state(self):
+        if not self.mixer_guard_active or not self.mixer_exists: return False
+        target = int(self.mixer_lock_scale.get_value())
+        subprocess.run(["pactl", "set-sink-mute", "AudioMixer_Virtual", "0"], stderr=subprocess.DEVNULL)
+        subprocess.run(["pactl", "set-sink-volume", "AudioMixer_Virtual", f"{target}%"], stderr=subprocess.DEVNULL)
+        self.is_muted = False
+        self.update_mute_ui()
+        return True
+
+    def on_mic_guard_toggled(self, sw, state):
+        self.mic_guard_active = state
+        if state:
+            interval = int(self.mic_spin.get_value()) * 1000
+            self.mic_guard_timer = GLib.timeout_add(interval, self.enforce_mic_state)
+            self.enforce_mic_state()
+            self.mic_combo.set_sensitive(False)
+            self.log_message("Mic Guard ON")
+        else:
+            if self.mic_guard_timer: GLib.source_remove(self.mic_guard_timer)
+            self.mic_combo.set_sensitive(True)
+            self.log_message("Mic Guard OFF")
+
+    def enforce_mic_state(self):
+        if not self.mic_guard_active: return False
+        mic = self.mic_combo.get_active_id()
+        vol = int(self.mic_scale.get_value())
+        if not mic: return True
+        subprocess.run(["pactl", "set-source-mute", mic, "0"], stderr=subprocess.DEVNULL)
+        subprocess.run(["pactl", "set-source-volume", mic, f"{vol}%"], stderr=subprocess.DEVNULL)
+        return True
+
+    def check_mixer_status(self):
+        try:
+            r = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True)
+            self.mixer_exists = "AudioMixer_Virtual" in r.stdout
+        except: self.mixer_exists = False
+
+    def log_message(self, msg): pass
+    def update_status_display(self): pass
+    def update_mute_ui(self): pass
+    def set_volume_controls_sensitive(self, s): pass
+
+
+# ==========================================
+# ADVANCED VIEW (Fixed Size, Scrollable)
+# ==========================================
+class AdvancedModeWindow(AudioMixerBase):
+    def __init__(self, state_source=None):
+        super().__init__("Audio Mixer Manager (Pro)")
+        self.set_default_size(650, 850)
+        self.set_size_request(550, 700)
+        self.set_border_width(15)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        # RESIZE DISABLED
+        self.set_resizable(False) 
+        self.connect("destroy", self.on_window_destroy)
+
+        # Main Layout: Fixed Header + Scrollable Content
+        main_layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(main_layout)
+
+        # 1. FIXED HEADER
+        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        hb.set_border_width(10)
+        main_layout.pack_start(hb, False, False, 0)
+        
+        back = Gtk.Button(label="← Back")
+        back.connect("clicked", self.on_back_clicked)
+        hb.pack_start(back, False, False, 0)
+        
+        hb.pack_start(Gtk.Label(), True, True, 0)
+        hb.pack_start(Gtk.Label(label="<big><b>Virtual Mixer (Pro)</b></big>", use_markup=True), False, False, 0)
+        hb.pack_start(Gtk.Label(), True, True, 0)
+        
+        switch = Gtk.Button(label="👁️ Compact")
+        switch.connect("clicked", lambda b: self.switch_window(CompactModeWindow))
+        hb.pack_start(switch, False, False, 0)
+
+        # 2. SCROLLABLE BODY
+        scrolled_window = Gtk.ScrolledWindow()
+        scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        main_layout.pack_start(scrolled_window, True, True, 0)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
+        vbox.set_border_width(15)
+        scrolled_window.add(vbox)
+
+        # -- Status --
+        stat_f = Gtk.Frame(label="Status")
+        sb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        sb.set_border_width(10)
+        stat_f.add(sb)
+        vbox.pack_start(stat_f, False, False, 0)
+        self.mixer_lbl = Gtk.Label(xalign=0)
+        self.mon_lbl = Gtk.Label(xalign=0)
+        sb.pack_start(self.mixer_lbl, False, False, 0)
+        sb.pack_start(self.mon_lbl, False, False, 0)
+
+        # -- Volume --
+        vol_f = Gtk.Frame(label="Mixer Volume")
+        vb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        vb.set_border_width(15)
+        vol_f.add(vb)
+        vbox.pack_start(vol_f, False, False, 0)
+        
+        row1 = Gtk.Box(homogeneous=True, spacing=10)
+        self.btn_up = Gtk.Button(label="🔊 Volume Up"); self.btn_up.connect("clicked", self.on_volume_up)
+        self.btn_dn = Gtk.Button(label="🔉 Volume Down"); self.btn_dn.connect("clicked", self.on_volume_down)
+        row1.pack_start(self.btn_up, True, True, 0); row1.pack_start(self.btn_dn, True, True, 0)
+        vb.pack_start(row1, False, False, 0)
+        
+        row2 = Gtk.Box(homogeneous=True, spacing=10)
+        self.btn_mute = Gtk.Button(label="🔇 Mute"); self.btn_mute.connect("clicked", self.on_toggle_mute)
+        self.btn_graph = Gtk.Button(label="📊 Graph"); self.btn_graph.connect("clicked", self.on_open_graph)
+        row2.pack_start(self.btn_mute, True, True, 0); row2.pack_start(self.btn_graph, True, True, 0)
+        vb.pack_start(row2, False, False, 0)
+        
+        step_b = Gtk.Box(spacing=10)
+        step_b.pack_start(Gtk.Label(label="Step (%):"), False, False, 0)
+        self.step_entry = Gtk.Entry(text="20", width_chars=5)
+        step_b.pack_start(self.step_entry, False, False, 0)
+        apply = Gtk.Button(label="Apply"); apply.connect("clicked", self.on_update_step)
+        step_b.pack_start(apply, False, False, 0)
+        vb.pack_start(step_b, False, False, 0)
+
+        vb.pack_start(Gtk.Separator(), False, False, 5)
+        
+        # Mixer Guard
+        lb = Gtk.Box(spacing=10)
+        lb.pack_start(Gtk.Label(label="<b>Lock Level:</b>", use_markup=True), False, False, 0)
+        self.mixer_lock_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 150, 1)
+        self.mixer_lock_scale.set_value(100); self.mixer_lock_scale.set_hexpand(True)
+        self.mixer_lock_val_label = Gtk.Label(label="100%")
+        self.mixer_lock_scale.connect("value-changed", lambda w: self.mixer_lock_val_label.set_text(f"{int(w.get_value())}%"))
+        lb.pack_start(self.mixer_lock_scale, True, True, 0)
+        lb.pack_start(self.mixer_lock_val_label, False, False, 0)
+        self.mixer_guard_switch = Gtk.Switch(); self.mixer_guard_switch.set_valign(Gtk.Align.CENTER)
+        self.mixer_guard_switch.connect("state-set", self.on_mixer_guard_toggled)
+        lb.pack_start(self.mixer_guard_switch, False, False, 0)
+        vb.pack_start(lb, False, False, 0)
+
+        # -- Mic Guard --
+        mic_f = Gtk.Frame(label="Microphone Guard")
+        mb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        mb.set_border_width(15)
+        mic_f.add(mb)
+        vbox.pack_start(mic_f, False, False, 0)
+        
+        src_row = Gtk.Box(spacing=10)
+        self.mic_combo = Gtk.ComboBoxText(); self.mic_combo.set_hexpand(True)
+        src_row.pack_start(self.mic_combo, True, True, 0)
+        ref = Gtk.Button(label="🔄"); ref.connect("clicked", lambda b: self.load_microphone_sources(self.mic_combo))
+        src_row.pack_start(ref, False, False, 0)
+        mb.pack_start(src_row, False, False, 0)
+        
+        self.mic_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 150, 1)
+        self.mic_scale.set_value(100)
+        mb.pack_start(self.mic_scale, False, False, 0)
+        
+        ctrl_row = Gtk.Box(spacing=10)
+        ctrl_row.pack_start(Gtk.Label(label="Interval (s):"), False, False, 0)
+        self.mic_spin = Gtk.SpinButton.new_with_range(1, 60, 1); self.mic_spin.set_value(2)
+        ctrl_row.pack_start(self.mic_spin, False, False, 0)
+        ctrl_row.pack_start(Gtk.Label(), True, True, 0)
+        self.mic_switch = Gtk.Switch(); self.mic_switch.set_valign(Gtk.Align.CENTER)
+        self.mic_switch.connect("state-set", self.on_mic_guard_toggled)
+        ctrl_row.pack_start(self.mic_switch, False, False, 0)
+        mb.pack_start(ctrl_row, False, False, 0)
+
+        # -- Admin --
+        adm_f = Gtk.Frame(label="Mixer Controls")
+        ab = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        ab.set_border_width(10)
+        adm_f.add(ab)
+        vbox.pack_start(adm_f, False, False, 0)
+        
+        self.create_button = Gtk.Button(label="Create Mixer"); self.create_button.connect("clicked", self.on_create_clicked)
+        ab.pack_start(self.create_button, False, False, 0)
+        
+        arow = Gtk.Box(homogeneous=True, spacing=10)
+        self.start_button = Gtk.Button(label="Start Monitor"); self.start_button.connect("clicked", self.on_start_clicked)
+        self.stop_button = Gtk.Button(label="Stop Monitor"); self.stop_button.connect("clicked", self.on_stop_clicked)
+        arow.pack_start(self.start_button, True, True, 0); arow.pack_start(self.stop_button, True, True, 0)
+        ab.pack_start(arow, False, False, 0)
+        
+        self.delete_button = Gtk.Button(label="Delete Mixer"); self.delete_button.connect("clicked", self.on_delete_clicked)
+        ab.pack_start(self.delete_button, False, False, 0)
+
+        # -- Log --
+        log_f = Gtk.Frame(label="Log")
+        vbox.pack_start(log_f, False, False, 0)
+        
+        log_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        log_f.add(log_box)
+        
+        sw = Gtk.ScrolledWindow()
+        sw.set_size_request(-1, 200)
+        self.log_view = Gtk.TextView(editable=False, wrap_mode=Gtk.WrapMode.WORD)
+        self.log_buffer = self.log_view.get_buffer()
+        sw.add(self.log_view)
+        log_box.pack_start(sw, True, True, 0)
+        
+        foot = Gtk.Box()
+        clr = Gtk.Button(label="Clear"); clr.connect("clicked", lambda b: self.log_buffer.set_text(""))
+        foot.pack_start(clr, False, False, 0)
+        qt = Gtk.Button(label="Quit"); qt.connect("clicked", self.on_back_clicked)
+        foot.pack_end(qt, False, False, 0)
+        log_box.pack_start(foot, False, False, 0)
+
+        # Initialize
+        self.load_microphone_sources(self.mic_combo)
+        if state_source: self.transfer_state_from(state_source)
+        else: self.check_mixer_status()
+        self.update_status_display()
+        self.update_mute_ui()
+        self.show_all()
+
+    def log_message(self, msg):
+        end = self.log_buffer.get_end_iter()
+        self.log_buffer.insert(end, msg + "\n")
+        self.log_view.scroll_mark_onscreen(self.log_buffer.create_mark(None, end, False))
+
+    def update_status_display(self):
+        self.mixer_lbl.set_markup(f"Mixer: {'🟢 Active' if self.mixer_exists else '🔴 Missing'}")
+        self.mon_lbl.set_markup(f"Monitor: {'🟢 Running' if self.is_monitoring else '⚪ Stopped'}")
+        self.create_button.set_sensitive(not self.mixer_exists)
+        self.delete_button.set_sensitive(self.mixer_exists and not self.is_monitoring)
+        self.start_button.set_sensitive(self.mixer_exists and not self.is_monitoring)
+        self.stop_button.set_sensitive(self.is_monitoring)
+        self.set_volume_controls_sensitive(self.mixer_exists)
+        self.mixer_guard_switch.set_sensitive(self.mixer_exists)
+        self.mixer_lock_scale.set_sensitive(self.mixer_exists)
+
+    def set_volume_controls_sensitive(self, sensitive):
+        if self.mixer_guard_active:
+            self.btn_up.set_sensitive(False)
+            self.btn_dn.set_sensitive(False)
+            self.btn_mute.set_sensitive(False)
+        else:
+            self.btn_up.set_sensitive(sensitive)
+            self.btn_dn.set_sensitive(sensitive)
+            self.btn_mute.set_sensitive(sensitive)
+        self.step_entry.set_sensitive(sensitive)
+        self.btn_graph.set_sensitive(True)
+
+    def update_mute_ui(self):
+        self.btn_mute.set_label("🔊 Unmute" if self.is_muted else "🔇 Mute")
+
+
+# ==========================================
+# COMPACT VIEW (Fixed Size, Scrollable)
+# ==========================================
+class CompactModeWindow(AudioMixerBase):
+    def __init__(self, state_source=None):
+        super().__init__("Audio Mixer (Compact)")
+        self.set_default_size(420, 550)
+        self.set_size_request(380, 450)
+        self.set_border_width(5)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        # RESIZE DISABLED
+        self.set_resizable(False)
+        self.connect("destroy", self.on_window_destroy)
+
+        main_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        self.add(main_vbox)
+
+        # Header
+        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        main_vbox.pack_start(hb, False, False, 0)
+        back = Gtk.Button(label="←"); back.connect("clicked", self.on_back_clicked)
+        hb.pack_start(back, False, False, 0)
+        self.status_lbl = Gtk.Label()
+        hb.pack_start(self.status_lbl, True, True, 0)
+        switch = Gtk.Button(label="👁️ Pro"); switch.connect("clicked", lambda b: self.switch_window(AdvancedModeWindow))
+        hb.pack_start(switch, False, False, 0)
+
+        # Notebook
+        nb = Gtk.Notebook()
+        main_vbox.pack_start(nb, True, True, 0)
+
+        # TAB 1: CONTROL (Scrollable)
+        sw1 = Gtk.ScrolledWindow()
+        sw1.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        t1 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        t1.set_border_width(10)
+        sw1.add(t1)
+        nb.append_page(sw1, Gtk.Label(label="Control"))
+
+        r1 = Gtk.Box(homogeneous=True, spacing=5)
+        self.create_button = Gtk.Button(label="Create"); self.create_button.connect("clicked", self.on_create_clicked)
+        self.delete_button = Gtk.Button(label="Delete"); self.delete_button.connect("clicked", self.on_delete_clicked)
+        r1.pack_start(self.create_button, True, True, 0); r1.pack_start(self.delete_button, True, True, 0)
+        t1.pack_start(r1, False, False, 0)
+
+        r2 = Gtk.Box(homogeneous=True, spacing=5)
+        self.start_button = Gtk.Button(label="Monitor"); self.start_button.connect("clicked", self.on_start_clicked)
+        self.stop_button = Gtk.Button(label="Stop"); self.stop_button.connect("clicked", self.on_stop_clicked)
+        r2.pack_start(self.start_button, True, True, 0); r2.pack_start(self.stop_button, True, True, 0)
+        t1.pack_start(r2, False, False, 0)
+
+        t1.pack_start(Gtk.Separator(), False, False, 5)
+
+        r3 = Gtk.Box(homogeneous=True, spacing=5)
+        self.btn_up = Gtk.Button(label="Vol +"); self.btn_up.connect("clicked", self.on_volume_up)
+        self.btn_dn = Gtk.Button(label="Vol -"); self.btn_dn.connect("clicked", self.on_volume_down)
+        r3.pack_start(self.btn_up, True, True, 0); r3.pack_start(self.btn_dn, True, True, 0)
+        t1.pack_start(r3, False, False, 0)
+
+        r4 = Gtk.Box(homogeneous=True, spacing=5)
+        self.btn_mute = Gtk.Button(label="Mute"); self.btn_mute.connect("clicked", self.on_toggle_mute)
+        self.btn_graph = Gtk.Button(label="Graph"); self.btn_graph.connect("clicked", self.on_open_graph)
+        r4.pack_start(self.btn_mute, True, True, 0); r4.pack_start(self.btn_graph, True, True, 0)
+        t1.pack_start(r4, False, False, 0)
+
+        step = Gtk.Box(spacing=5)
+        step.pack_start(Gtk.Label(label="Step %:"), False, False, 0)
+        self.step_entry = Gtk.Entry(text="20", width_chars=4)
+        step.pack_start(self.step_entry, False, False, 0)
+        apply = Gtk.Button(label="Set"); apply.connect("clicked", self.on_update_step)
+        step.pack_start(apply, False, False, 0)
+        t1.pack_start(step, False, False, 0)
+
+        # TAB 2: GUARDS (Scrollable)
+        sw2 = Gtk.ScrolledWindow()
+        sw2.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        t2 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        t2.set_border_width(10)
+        sw2.add(t2)
+        nb.append_page(sw2, Gtk.Label(label="Guards"))
+
+        t2.pack_start(Gtk.Label(label="<b>Mixer Lock:</b>", use_markup=True, xalign=0), False, False, 0)
+        lbox = Gtk.Box(spacing=5)
+        self.mixer_lock_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 150, 1)
+        self.mixer_lock_scale.set_value(100); self.mixer_lock_scale.set_hexpand(True)
+        self.mixer_lock_lbl = Gtk.Label(label="100%")
+        self.mixer_lock_scale.connect("value-changed", lambda w: self.mixer_lock_lbl.set_text(f"{int(w.get_value())}%"))
+        lbox.pack_start(self.mixer_lock_scale, True, True, 0)
+        lbox.pack_start(self.mixer_lock_lbl, False, False, 0)
+        self.mixer_guard_switch = Gtk.Switch(); self.mixer_guard_switch.set_valign(Gtk.Align.CENTER)
+        self.mixer_guard_switch.connect("state-set", self.on_mixer_guard_toggled)
+        lbox.pack_start(self.mixer_guard_switch, False, False, 0)
+        t2.pack_start(lbox, False, False, 0)
+
+        t2.pack_start(Gtk.Separator(), False, False, 5)
+
+        t2.pack_start(Gtk.Label(label="<b>Mic Guard:</b>", use_markup=True, xalign=0), False, False, 0)
+        self.mic_combo = Gtk.ComboBoxText()
+        mbox = Gtk.Box(spacing=5)
+        mbox.pack_start(self.mic_combo, True, True, 0)
+        ref = Gtk.Button(label="🔄"); ref.connect("clicked", lambda b: self.load_microphone_sources(self.mic_combo))
+        mbox.pack_start(ref, False, False, 0)
+        t2.pack_start(mbox, False, False, 0)
+        
+        self.mic_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 150, 1)
+        self.mic_scale.set_value(100)
+        t2.pack_start(self.mic_scale, False, False, 0)
+        
+        cbox = Gtk.Box(spacing=5)
+        cbox.pack_start(Gtk.Label(label="Int (s):"), False, False, 0)
+        self.mic_spin = Gtk.SpinButton.new_with_range(1, 60, 1); self.mic_spin.set_value(2)
+        cbox.pack_start(self.mic_spin, False, False, 0)
+        cbox.pack_start(Gtk.Label(), True, True, 0)
+        self.mic_switch = Gtk.Switch(); self.mic_switch.set_valign(Gtk.Align.CENTER)
+        self.mic_switch.connect("state-set", self.on_mic_guard_toggled)
+        cbox.pack_start(self.mic_switch, False, False, 0)
+        t2.pack_start(cbox, False, False, 0)
+
+        # TAB 3: LOG (Scrollable)
+        t3 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        t3.set_border_width(5)
+        nb.append_page(t3, Gtk.Label(label="Log"))
+        sw3 = Gtk.ScrolledWindow()
+        self.log_view = Gtk.TextView(editable=False, wrap_mode=Gtk.WrapMode.WORD)
+        self.log_buffer = self.log_view.get_buffer()
+        sw3.add(self.log_view)
+        t3.pack_start(sw3, True, True, 0)
+        clr = Gtk.Button(label="Clear Log"); clr.connect("clicked", lambda b: self.log_buffer.set_text(""))
+        t3.pack_start(clr, False, False, 0)
+
+        # Init
+        self.load_microphone_sources(self.mic_combo)
+        if state_source: self.transfer_state_from(state_source)
+        else: self.check_mixer_status()
+        self.update_status_display()
+        self.update_mute_ui()
+        self.show_all()
+
+    def log_message(self, msg):
+        end = self.log_buffer.get_end_iter()
+        self.log_buffer.insert(end, msg + "\n")
+        self.log_view.scroll_mark_onscreen(self.log_buffer.create_mark(None, end, False))
+
+    def update_status_display(self):
+        m = "🟢" if self.mixer_exists else "🔴"
+        mon = "🟢" if self.is_monitoring else "⚪"
+        self.status_lbl.set_text(f"{m} Mixer | {mon} Mon")
+        
+        self.create_button.set_sensitive(not self.mixer_exists)
+        self.delete_button.set_sensitive(self.mixer_exists and not self.is_monitoring)
+        self.start_button.set_sensitive(self.mixer_exists and not self.is_monitoring)
+        self.stop_button.set_sensitive(self.is_monitoring)
+        self.set_volume_controls_sensitive(self.mixer_exists)
+        self.mixer_guard_switch.set_sensitive(self.mixer_exists)
+        self.mixer_lock_scale.set_sensitive(self.mixer_exists)
+
+    def set_volume_controls_sensitive(self, sensitive):
+        if self.mixer_guard_active:
+            self.btn_up.set_sensitive(False)
+            self.btn_dn.set_sensitive(False)
+            self.btn_mute.set_sensitive(False)
+        else:
+            self.btn_up.set_sensitive(sensitive)
+            self.btn_dn.set_sensitive(sensitive)
+            self.btn_mute.set_sensitive(sensitive)
+        self.btn_graph.set_sensitive(True)
+
+    def update_mute_ui(self):
+        self.btn_mute.set_label("Unmute" if self.is_muted else "Mute")
 
 def main():
     missing = []
@@ -799,9 +676,9 @@ def main():
         dialog.run()
         dialog.destroy()
         return
-    
-    win = AudioMixerGUI()
-    win.show_all()
+
+    # START DIRECTLY IN COMPACT MODE
+    win = CompactModeWindow()
     Gtk.main()
 
 if __name__ == "__main__":
