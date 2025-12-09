@@ -3,6 +3,7 @@
 Simplified Audio Output-to-Input Connection GUI
 GTK interface for managing the virtual audio mixer with volume control
 FIXED: Proper subprocess cleanup without psutil dependency
+ADDED: Microphone Force 100% Feature
 """
 
 import gi
@@ -14,38 +15,27 @@ import threading
 import os
 import signal
 import time
-
-
-
-#------------------Window Solution----------------------------------
-
-# Add this after gi.require_version and imports
 import sys
 
 # Set application ID to match desktop file
 GLib.set_prgname("com.audioshare.AudioConnectionManager")
 GLib.set_application_name("Audio Sharing Control")
 
-
-
-#------------------------------------------------------------------------
-
-
 class AudioMixerGUI(Gtk.Window):
     def __init__(self):
         super().__init__(title="Audio Mixer Manager")
 
-        # In the Window __init__, add:
         self.set_icon_name("com.audioshare.AudioConnectionManager")
-
-        self.set_default_size(400, 350)
+        
+        # Increased height slightly to accommodate new controls
+        self.set_default_size(400, 420)
         self.set_border_width(15)
         self.set_resizable(False)
         
         # State variables
         self.monitor_process = None
         self.monitor_thread = None
-        self.launched_processes = []  # Track all launched processes
+        self.launched_processes = []
         self.is_connected = False
         self.is_connecting = False
         self.step_percentage = 20
@@ -56,9 +46,9 @@ class AudioMixerGUI(Gtk.Window):
         self.monitor_visible = False
         self.monitor_window = None
         
-       
+        # Microphone enforcement state
+        self.mic_timer_id = None
 
-        
         # Main container
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
         self.add(vbox)
@@ -92,12 +82,10 @@ class AudioMixerGUI(Gtk.Window):
         
         self.connect_button = Gtk.Button(label="Connect")
         self.connect_button.connect("clicked", self.on_connect_clicked)
-        #self.connect_button.connect("clicked", self.on_monitor_clicked)
         button_box.pack_start(self.connect_button, True, True, 0)
         
         self.disconnect_button = Gtk.Button(label="Disconnect")
         self.disconnect_button.connect("clicked", self.on_disconnect_clicked)
-        #self.disconnect_button.connect("clicked", self.off_monitor_clicked)
         self.disconnect_button.set_sensitive(False)
         button_box.pack_start(self.disconnect_button, True, True, 0)
         
@@ -107,8 +95,8 @@ class AudioMixerGUI(Gtk.Window):
         separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
         vbox.pack_start(separator, False, False, 5)
         
-        # Volume Control Frame
-        volume_frame = Gtk.Frame(label="Volume Control")
+        # --- Volume Control Frame (Virtual Mixer) ---
+        volume_frame = Gtk.Frame(label="Virtual Mixer Volume")
         volume_frame.set_label_align(0.5, 0.5)
         volume_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         volume_box.set_border_width(15)
@@ -155,6 +143,30 @@ class AudioMixerGUI(Gtk.Window):
         self.volume_status_label = Gtk.Label()
         self.volume_status_label.set_markup('<span foreground="green">Ready</span>')
         volume_box.pack_start(self.volume_status_label, False, False, 0)
+
+        # Separator
+        separator3 = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        vbox.pack_start(separator3, False, False, 5)
+
+        # --- Microphone Control Frame (NEW) ---
+        mic_frame = Gtk.Frame(label="Microphone Settings")
+        mic_frame.set_label_align(0.5, 0.5)
+        mic_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        mic_box.set_border_width(10)
+        mic_frame.add(mic_box)
+        vbox.pack_start(mic_frame, False, False, 0)
+
+        mic_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        mic_box.pack_start(mic_hbox, False, False, 0)
+
+        # Checkbox to force 100%
+        self.mic_force_check = Gtk.CheckButton(label="Force Default Mic to 100%")
+        self.mic_force_check.set_tooltip_text("Keeps your default microphone volume at 100%\neven if other apps try to lower it.")
+        self.mic_force_check.connect("toggled", self.on_mic_force_toggled)
+        mic_hbox.pack_start(self.mic_force_check, True, True, 0)
+        
+        self.mic_status_label = Gtk.Label(label="")
+        mic_hbox.pack_start(self.mic_status_label, False, False, 0)
         
         # Initially disable volume controls
         self.set_volume_controls_sensitive(False)
@@ -192,6 +204,51 @@ class AudioMixerGUI(Gtk.Window):
         
         self.on_monitor_clicked(button=type("obj", (object,), {"set_label": lambda self, x: None})())
 
+    # --- Microphone Logic ---
+    
+    def on_mic_force_toggled(self, button):
+        """Handle microphone force toggle"""
+        if button.get_active():
+            # Apply immediately
+            self.enforce_mic_volume()
+            # Start timer (check every 2 seconds)
+            if self.mic_timer_id is None:
+                self.mic_timer_id = GLib.timeout_add_seconds(2, self.enforce_mic_volume)
+            self.mic_status_label.set_markup('<span foreground="green"><b>Active</b></span>')
+        else:
+            # Stop timer
+            if self.mic_timer_id:
+                GLib.source_remove(self.mic_timer_id)
+                self.mic_timer_id = None
+            self.mic_status_label.set_markup('<span foreground="gray">Inactive</span>')
+
+    def enforce_mic_volume(self):
+        """Set default source volume to 100% and unmute"""
+        if not self.mic_force_check.get_active():
+            self.mic_timer_id = None
+            return False # Stop timer
+
+        try:
+            # @DEFAULT_SOURCE@ is a PulseAudio/PipeWire variable for the current default input
+            # Set volume to 100%
+            subprocess.run(
+                ["pactl", "set-source-volume", "@DEFAULT_SOURCE@", "100%"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            # Ensure it is unmuted
+            subprocess.run(
+                ["pactl", "set-source-mute", "@DEFAULT_SOURCE@", "0"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            pass # Fail silently in background loop
+        
+        return True # Keep timer running
+
+    # --- End Microphone Logic ---
+
     def get_script_path(self):
         """Get the path to the bash script"""
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -215,8 +272,6 @@ class AudioMixerGUI(Gtk.Window):
     def get_legacy_script_path(self):
         """Get the path to the legacy audioshare script"""
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        # Try multiple possible file names
         possible_names = ["audioshare.sh", "audioshare.py", "audioshare"]
         
         for name in possible_names:
@@ -229,21 +284,15 @@ class AudioMixerGUI(Gtk.Window):
     def kill_process_tree(self, pid):
         """Kill a process and all its children using OS commands"""
         try:
-            # Use pkill to kill process group
-            # The negative PID kills the entire process group
             os.killpg(os.getpgid(pid), signal.SIGTERM)
             time.sleep(0.5)
-            
-            # Check if still alive, then force kill
             try:
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
             except ProcessLookupError:
-                pass  # Already dead
-                
+                pass
         except ProcessLookupError:
-            pass  # Process doesn't exist
+            pass
         except Exception as e:
-            # Fallback: try killing just the main process
             try:
                 os.kill(pid, signal.SIGTERM)
                 time.sleep(0.3)
@@ -521,10 +570,6 @@ class AudioMixerGUI(Gtk.Window):
                 color=(0.2, 0.8, 0.2),  # Green
                 dark_theme=True
             )
-                
-            # Make the waveform widget compact (smaller height)
-            #self.audio_monitor.waveform.set_size_request(380, 80)
-            
             
             self.monitor_container.pack_start(self.audio_monitor, False, False, 0)
             self.audio_monitor.show_all()
@@ -541,20 +586,6 @@ class AudioMixerGUI(Gtk.Window):
         except Exception as e:
             self.show_error_dialog(f"Failed to start audio monitor: {e}")
 
-#    def off_monitor_clicked(self, button):
-#        """Toggle audio monitor visibility to off (compact embedded version)"""
-#        # Hide and destroy monitor
-#        if self.audio_monitor:
-#            self.audio_monitor.stop()
-#            self.audio_monitor.cleanup()
-#            self.monitor_container.remove(self.audio_monitor)
-#            self.audio_monitor = None
-            
-        # Shrink window back
-        current_width, current_height = self.get_size()
-        self.resize(current_width, current_height - 100)
-
-
     def on_monitor_window_closed(self, widget):
         """Handle monitor window being closed by user"""
         if self.audio_monitor:
@@ -565,8 +596,6 @@ class AudioMixerGUI(Gtk.Window):
         self.monitor_window = None
         self.monitor_visible = False
         
-        # Update button label (find the button in bottom_box)
-        # Use idle_add to safely update UI
         GLib.idle_add(self.reset_monitor_button_label)
 
     def close_monitor_window(self):
@@ -581,7 +610,6 @@ class AudioMixerGUI(Gtk.Window):
             self.monitor_window = None
         
         self.monitor_visible = False
-
 
     def on_monitor_stopped_unexpectedly(self):
         """Handle monitor stopping unexpectedly"""
@@ -703,6 +731,11 @@ class AudioMixerGUI(Gtk.Window):
             return
         
         try:
+            # Clean up microphone timer before switching
+            if self.mic_timer_id:
+                GLib.source_remove(self.mic_timer_id)
+                self.mic_timer_id = None
+
             # Launch with new session to detach from parent
             proc = subprocess.Popen(
                 ["python3", advanced_path],
@@ -726,32 +759,23 @@ class AudioMixerGUI(Gtk.Window):
         """Open legacy audioshare app"""
         legacy_path = self.get_legacy_script_path()
         if not legacy_path:
-            self.show_error_dialog("Legacy app script not found\n\nLooking for: audioshare.sh, audioshare.py, or audioshare")
+            self.show_error_dialog("Legacy app script not found")
             return
         
         try:
-            # Detect file type
+            # Clean up microphone timer before switching
+            if self.mic_timer_id:
+                GLib.source_remove(self.mic_timer_id)
+                self.mic_timer_id = None
+
             cmd = None
             if legacy_path.endswith('.py'):
                 cmd = ["python3", legacy_path]
             elif legacy_path.endswith('.sh'):
-                with open(legacy_path, 'r') as f:
-                    first_line = f.readline().strip()
-                
-                if 'python' in first_line or 'import' in first_line:
-                    cmd = ["python3", legacy_path]
-                else:
-                    cmd = ["bash", legacy_path]
+                cmd = ["bash", legacy_path]
             else:
-                with open(legacy_path, 'r') as f:
-                    first_line = f.readline().strip()
-                
-                if 'python' in first_line:
-                    cmd = ["python3", legacy_path]
-                else:
-                    cmd = [legacy_path]
+                cmd = [legacy_path]
             
-            # Launch with new session
             proc = subprocess.Popen(
                 cmd,
                 start_new_session=True,
@@ -782,6 +806,11 @@ class AudioMixerGUI(Gtk.Window):
         """Cleanup before exit"""
         with self.state_lock:
             self.shutdown_flag = True
+        
+        # STOP MIC TIMER
+        if self.mic_timer_id:
+            GLib.source_remove(self.mic_timer_id)
+            self.mic_timer_id = None
         
         self.close_monitor_window()
         
@@ -816,10 +845,7 @@ class AudioMixerGUI(Gtk.Window):
                     timeout=5
                 )
             except Exception:
-                pass  # Best effort cleanup
-        
-        # Note: We DON'T clean up launched_processes here
-        # because those are meant to stay running
+                pass
 
 def main():
     # Check dependencies
